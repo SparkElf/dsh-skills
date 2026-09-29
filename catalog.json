@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "repository": "SparkElf/dsh-skills",
+  "source": ".agents/skills",
+  "skillCount": 26,
+  "skills": [
+    {
+      "name": "architecture-planning",
+      "description": "技术方案、设计模式优化、模块边界、任务拆解。工作流第二阶段。",
+      "path": ".agents/skills/architecture-planning/SKILL.md"
+    },
+    {
+      "name": "chroma-key-cutout",
+      "description": "Use when the user asks to remove green-screen or chroma-key backgrounds from local raster images, create transparent PNG cutouts, validate alpha edges, or batch-repeat the same keying workflow for UI/game/art assets.",
+      "path": ".agents/skills/chroma-key-cutout/SKILL.md"
+    },
+    {
+      "name": "code-review",
+      "description": "边审边修，复评通过后进入测试。工作流第四阶段。",
+      "path": ".agents/skills/code-review/SKILL.md"
+    },
+    {
+      "name": "dataops-workspace-image-customization",
+      "description": "改 DataOps 工作区镜像（dataops/infra/docker-workspace/）里的 DSH 行为时使用：隐藏弹窗、关闭 onboarding、改插件配置、换 standalone 版本、调 profile 内容。讲清「该改哪一层」（profile 配置 / overlay patch / 官方 Config / 重打包），以及镜像升级时改动不生效的四个真实坑。要改 DSH 在工作区里的任何默认行为前，先读这个。",
+      "path": ".agents/skills/dataops-workspace-image-customization/SKILL.md"
+    },
+    {
+      "name": "design-taste-frontend",
+      "description": "Anti-slop frontend skill for landing pages, portfolios, and redesigns. The agent reads the brief, infers the right design direction, and ships interfaces that do not look templated. Real design systems when applicable, audit-first on redesigns, strict pre-flight check.",
+      "path": ".agents/skills/design-taste-frontend/SKILL.md"
+    },
+    {
+      "name": "dsh-archive-agent-notes",
+      "description": "Use when adding, auditing, pruning, archiving, restoring, or reviewing Agent Notes in deepseek-harness; checks every new note for superseded active records, classifies implemented notes by future decision value, deletes rejected notes that no longer prevent a tempting fallacy, and applies the frozen archived/{kind} triplet and manifest rules.",
+      "path": ".agents/skills/dsh-archive-agent-notes/SKILL.md"
+    },
+    {
+      "name": "dsh-ci-test-reliability",
+      "description": "Design, review, and diagnose DeepSeek Harness tests and fixtures that can fail nondeterministically under CI concurrency, shared host resources, clocks, process-global state, subprocesses, network listeners, or asynchronous teardown. Use when adding or changing tests with those risks, investigating flaky CI, or reviewing test isolation; use dsh-pre-push-checks separately to select outgoing commands.",
+      "path": ".agents/skills/dsh-ci-test-reliability/SKILL.md"
+    },
+    {
+      "name": "dsh-code-review",
+      "description": "Use when reviewing a pull request in the deepseek-harness repo — orients the reviewer to this codebase's standards (AGENTS.md conventions, defensive patterns, ADRs, quality gates) and the review-specific checks that code alone can't show",
+      "path": ".agents/skills/dsh-code-review/SKILL.md"
+    },
+    {
+      "name": "dsh-doc",
+      "description": "Create, restructure, review, audit, or migrate DeepSeek Harness Markdown documentation, package READMEs, and the documentation website using audience-first hierarchy, kind-mapped YAML metadata, bilingual line alignment, summary/contents navigation, progressive user-to-developer detail, executed-operation fact-checking, and repository validation. Use for new or revised DSH docs, docs-tree organization, documentation-quality audits and budgets, website page publishing, and bilingual documentation structure changes.",
+      "path": ".agents/skills/dsh-doc/SKILL.md"
+    },
+    {
+      "name": "dsh-find-simplifications",
+      "description": "Use when working in the deepseek-harness repo to find non-obvious simplification candidates, remove redundant comments or implementation-heavy documentation, write proposed Agent Notes or inline TODO/FIXME/XXX notes, audit or coalesce superseded Agent Notes, or fold worthwhile simplification ideas from another PR; especially for dead, duplicated, speculative, over-built, added-then-removed, or hand-rolled-where-a-dependency-exists surfaces.",
+      "path": ".agents/skills/dsh-find-simplifications/SKILL.md"
+    },
+    {
+      "name": "dsh-merging-stacked-prs",
+      "description": "Use when landing a stack of dependent GitHub PRs (A ← B ← C, where each bases on the one below) onto master, merging a PR whose base is another open PR's branch, or whenever a request mentions \"stacked PRs\", \"PR stack\", \"dependent PRs\", or merging several related PRs in sequence. Requires every same-repository dependency chain to use GitHub's official stacked-PR feature before landing so GitHub owns stack-wide rules, CI, ordering, retargeting, and merge state.",
+      "path": ".agents/skills/dsh-merging-stacked-prs/SKILL.md"
+    },
+    {
+      "name": "dsh-plugin-ownership-and-distribution",
+      "description": "Use before adding, moving, publishing, curating, default-mounting, or repairing a DSH capability — including a defect inside a capability another plugin owns — to decide plugin ownership, npm distribution, repository placement, and profile composition independently.",
+      "path": ".agents/skills/dsh-plugin-ownership-and-distribution/SKILL.md"
+    },
+    {
+      "name": "dsh-pre-push-checks",
+      "description": "Use before pushing, force-pushing, marking ready for review, or claiming checks pass on a deepseek-harness branch, and immediately after gh stack sync publishes rewritten branches, to select the smallest tests and checks that cover the outgoing or just-published diff without reflexively running the full repository suite.",
+      "path": ".agents/skills/dsh-pre-push-checks/SKILL.md"
+    },
+    {
+      "name": "dsh-promote-deployment",
+      "description": "Use when promoting the running DSH deployment to a new release, building or switching a release mirror, restarting the supervisor that serves it, or diagnosing a deployment that reports a new version while serving old behavior. Covers the mirror build, the profile guard's acceptance step, and the runtime package versions that prove a promotion actually happened.",
+      "path": ".agents/skills/dsh-promote-deployment/SKILL.md"
+    },
+    {
+      "name": "dsh-prose-standard",
+      "description": "Use when writing, reviewing, restoring, trimming, or auditing prose in the deepseek-harness repo, including deciding where documentation or comments are required across Markdown, JSDoc, code and test comments, prompts, descriptions, diagnostics, and CLI or UI strings.",
+      "path": ".agents/skills/dsh-prose-standard/SKILL.md"
+    },
+    {
+      "name": "dsh-repo-release-pr",
+      "description": "在 SparkElf/deepseek-harness-plus（自有仓库）里发布 npm、开 PR、合并到 master 时使用。讲清 master 的服务端保护规则、加权批准（weighted approval）机制、为什么 PR 作者不能自己批准、以及 release:ship 的完整步骤顺序。排查「push 被拒」「PR 卡在 REVIEW_REQUIRED」「不知道谁来批准」时优先读它。",
+      "path": ".agents/skills/dsh-repo-release-pr/SKILL.md"
+    },
+    {
+      "name": "dsh-skill-discovery-links",
+      "description": "DSH 技能中心的技能不显示、想让某个目录（如代码仓库自带的 .agents/skills）的技能被自动发现、或要新增/迁移技能目录时使用。讲清技能中心的 6 类扫描根、为什么仓库自带的技能默认看不见、为什么不该用 customSkillDirs 改 profile、以及幂等同步脚本的用法。",
+      "path": ".agents/skills/dsh-skill-discovery-links/SKILL.md"
+    },
+    {
+      "name": "dsh-speed-up-perf",
+      "description": "Use when investigating or optimizing DeepSeek Harness performance, designing realistic synthetic benchmarks or CI performance gates, profiling long Sessions or Web responsiveness, or turning performance PR evidence into measured behavior-preserving fixes.",
+      "path": ".agents/skills/dsh-speed-up-perf/SKILL.md"
+    },
+    {
+      "name": "dsh-supervisor-restart",
+      "description": "重启 DSH/Plus 的 Web 服务（3080）或在部署里改配置、换插件、动环境变量时使用。讲清 supervisor 重启与 systemctl restart 的本质区别、何时才必须重建单元、$DSH_HOME/.env 的原生加载机制、以及会话内重启如何不当场杀死自己。排查「重启后连不上」「改了配置不生效」「端口被占」时优先读它。",
+      "path": ".agents/skills/dsh-supervisor-restart/SKILL.md"
+    },
+    {
+      "name": "dsh-translate-docs",
+      "description": "Manually run the extended DeepSeek Harness bilingual-document workflow, including generated briefings, delegated prose translation, whole-document translation, and scoped pairing verification.",
+      "path": ".agents/skills/dsh-translate-docs/SKILL.md"
+    },
+    {
+      "name": "dsh-trim-cot-leakage",
+      "description": "Use when auditing or fixing prose that reads like a leaked reasoning transcript — dead design-session citations such as (decision N), audit item codes, or §N of uncommitted drafts; change narration such as \"used to\", \"no longer\", \"this cut\"; stack or review vantage (\"a later PR in this stack\", \"rejected in review\"); reviewer-addressed justifications; control-flow narration; or hedged planning residue in comments, JSDoc, docs, or Agent Notes.",
+      "path": ".agents/skills/dsh-trim-cot-leakage/SKILL.md"
+    },
+    {
+      "name": "implementation",
+      "description": "按技术方案与任务清单编码。工作流第三阶段。",
+      "path": ".agents/skills/implementation/SKILL.md"
+    },
+    {
+      "name": "product-design",
+      "description": "需求澄清、交互定义、验收标准。工作流第一阶段。",
+      "path": ".agents/skills/product-design/SKILL.md"
+    },
+    {
+      "name": "record-browser-gif",
+      "description": "Record browser or Web UI interaction demos as optimized GIFs using the available browser-control workflow, optional Playwright Videos for higher capture frame rates, and deterministic encoding, then attach the GIF to a pull request with `gh --attach`, falling back to a dedicated assets branch where attach cannot apply. Use when asked to make, record, or generate a GIF that demonstrates a browser workflow, and for every pull request that changes product-user-visible GUI behavior, which MUST include a GIF recorded from the pull request's real server and model flow.",
+      "path": ".agents/skills/record-browser-gif/SKILL.md"
+    },
+    {
+      "name": "test-governance",
+      "description": "治理正常功能开发后的 Playwright UI 系统测试，以及测试脚本、fixture/SDK、CI 门禁和既有测试清理。系统测试只经 UI 操作完成真实前后端联调。",
+      "path": ".agents/skills/test-governance/SKILL.md"
+    },
+    {
+      "name": "verification",
+      "description": "对照验收标准验证功能、性能、边界、回归。工作流第五阶段。",
+      "path": ".agents/skills/verification/SKILL.md"
+    }
+  ]
+}
