@@ -1,0 +1,4 @@
+interface:
+  display_name: "Test Governance"
+  short_description: "Govern test value, layers, runners, and migration"
+  default_prompt: "Use $test-governance to design or review a focused, maintainable test strategy."
