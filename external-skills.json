@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "description": "当前环境中存在但不由 SparkElf/dsh-skills 维护的技能记录。",
+  "skills": [
+    {
+      "name": "officecli",
+      "sourcePath": "/root/.agents/skills/officecli/SKILL.md",
+      "status": "external-environment",
+      "reason": "全局环境安装，未纳入项目技能仓库；需由其来源 owner 负责分发和许可。"
+    },
+    {
+      "name": "officecli-xlsx",
+      "sourcePath": "/root/.agents/skills/officecli-xlsx/SKILL.md",
+      "status": "external-environment",
+      "reason": "全局环境安装，未纳入项目技能仓库；需由其来源 owner 负责分发和许可。"
+    }
+  ]
+}
