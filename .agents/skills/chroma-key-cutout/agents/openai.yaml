@@ -1,0 +1,4 @@
+interface:
+  display_name: "Chroma Key Cutout"
+  short_description: "Remove green-screen backgrounds to alpha PNG"
+  default_prompt: "Use $chroma-key-cutout to remove the green-screen background from this image and save a transparent PNG."
