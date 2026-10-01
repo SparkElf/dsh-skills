@@ -4,7 +4,7 @@ SparkElf 维护的 DeepSeek Harness 技能集合。技能正文位于 `.agents/s
 
 ## 当前内容
 
-仓库收录当前项目维护的 27 个技能。`catalog.json` 是由 `scripts/verify-skills.mjs` 生成并校验的技能索引。
+仓库收录当前项目维护的 28 个技能。`catalog.json` 是由 `scripts/verify-skills.mjs` 生成并校验的技能索引。
 
 技能来源是工作区级 `.agents/skills`。`deepseek-harness-plus/.agents/skills` 中的同名版本与本仓库收录版本逐项一致，因此这里保留一份权威副本，避免两个仓库分别演进。
 

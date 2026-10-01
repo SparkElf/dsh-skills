@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "repository": "SparkElf/dsh-skills",
   "source": ".agents/skills",
-  "skillCount": 27,
+  "skillCount": 28,
   "skills": [
     {
       "name": "architecture-planning",
@@ -118,6 +118,11 @@
       "name": "office-monthly-progress-report",
       "description": "把零散素材（git 提交、周报表、工单、口述、聊天记录）转写成中文项目进度月报 DOCX 时使用。模板可选：给了就对齐模板版式与计划段写法，没给就用内置版式并从零起草，缺的信息直接问用户。产出一份合文风、合口径、合排版的仿宋公文体月报。要写或改月度进度报告前先读这个。",
       "path": ".agents/skills/office-monthly-progress-report/SKILL.md"
+    },
+    {
+      "name": "online-course-automation",
+      "description": "Use when asked to complete an online course platform (刷课/挂课/刷学时) — driving a logged-in browser to play video lessons and pass document lessons to completion, especially 智学云/知识中心 (kc.zhixueyun.com), 网上大学, or any platform showing \"需学 N 秒/分钟\". Covers the real completion rules, the 1.5x speed ceiling, the abnormal-learning warning, and how to discover an unfamiliar platform's progress API.",
+      "path": ".agents/skills/online-course-automation/SKILL.md"
     },
     {
       "name": "product-design",
