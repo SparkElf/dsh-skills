@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "repository": "SparkElf/dsh-skills",
   "source": ".agents/skills",
-  "skillCount": 28,
+  "skillCount": 29,
   "skills": [
     {
       "name": "architecture-planning",
@@ -123,6 +123,11 @@
       "name": "online-course-automation",
       "description": "Use when asked to complete an online course platform (刷课/挂课/刷学时) — driving a logged-in browser to play video lessons and pass document lessons to completion, especially 智学云/知识中心 (kc.zhixueyun.com), 网上大学, or any platform showing \"需学 N 秒/分钟\". Covers the real completion rules, the 1.5x speed ceiling, the abnormal-learning warning, and how to discover an unfamiliar platform's progress API.",
       "path": ".agents/skills/online-course-automation/SKILL.md"
+    },
+    {
+      "name": "online-exam-automation",
+      "description": "Use when asked to take or complete an online exam in a logged-in browser — 在线考试/答题/结业考试/资格考试, 尤其是限次数的考试（如\"仅限10次机会\"）。Covers reading the paper, the limited-attempt risk model, how to probe which click mechanism actually works on an unfamiliar exam page, the four structural traps (all-questions-on-one-page, unknown click target, synthetic events ignored, sequence≠display order), and verified fill/verify/submit scripts.",
+      "path": ".agents/skills/online-exam-automation/SKILL.md"
     },
     {
       "name": "product-design",
