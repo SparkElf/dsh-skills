@@ -31,16 +31,35 @@ const videoState = (page) =>
 const progressText = (page) =>
   page.evaluate(() => (document.body.innerText.match(/课程进度[：:]\s*\d+%/g) || [])[0] || 'n/a');
 
+// Wait for the chapter's video element to appear.
+//
+// Do NOT sample this once after a fixed delay: the player mounts asynchronously
+// and the <video> can show up well after the chapter markup does. A single
+// early check misreads a video chapter as a document chapter and silently
+// "passes" it without playing anything — which is exactly what happened the
+// first time this ran against a new subject.
+async function waitForVideo(page, { timeout = 30000, interval = 1000 } = {}) {
+  const deadline = Date.now() + timeout;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await videoState(page);
+    if (last && Number.isFinite(last.dur) && last.dur > 0) return last;
+    await page.waitForTimeout(interval);
+  }
+  return last; // null (no <video>) or a not-yet-ready player
+}
+
 async function playChapterToEnd(page, index, total) {
   const item = page.locator('.chapter-item').nth(index);
   await item.scrollIntoViewIfNeeded().catch(() => {});
   const box = await item.boundingBox().catch(() => null);
   if (!box) return { ok: false, why: 'no-click-target' };
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-  await page.waitForTimeout(6000);
 
-  let s = await videoState(page);
+  let s = await waitForVideo(page);
   if (!s || !Number.isFinite(s.dur) || s.dur <= 0) {
+    // Genuinely a document section: no player ever loads. These credit after a
+    // short dwell, which the page advertises as "需学 00:05".
     log(`  ch${index + 1}/${total}: document section — dwelling`);
     await page.waitForTimeout(12000);
     return { ok: true, why: 'document' };
