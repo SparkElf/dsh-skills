@@ -367,6 +367,8 @@ DSH 从 0.1 → 0.2 这类升级，**以下每一处都可能静默失效**：
 | peer 声明的精确版本是否还满足新运行时 | **不是** `verify:published-peers`（它只比对源码与已发布，见第 15 节）——按第 15 节逐 bundle 核算 |
 | profile 是否真的重新复制了 | 第 3 节坑 3 |
 | 插件 pin 是否指向新版本 | `grep dsh-dataops-managed` 两个 manifest |
+| **范围依赖是否被年龄窗口回退** | 见 §16：对比声明版本 vs 实装版本 |
+| **patch 层挂载的插件是否真的装了** | 见 §17：逐个 `test -d node_modules/@sparkelf/<name>` |
 
 **一条命令审计镜像**（比逐个 grep 可靠）：
 
@@ -549,4 +551,152 @@ npm publish --access public --registry https://registry.npmjs.org
 | 各 patch 包的 `target.baseRevision` | 由 gate 强制等于 `sourceBase.revision` |
 
 **修法不是改值，是改成派生**：能从 `dshPlus.compatibility.dsh` 读的就不要写死，并加 gate 强制「floor 必须涵盖 overrides 里的 pin」。
+
+---
+
+## 16. 范围声明 + 发布年龄窗口 = **静默降级到旧版本**
+
+**这是「patch 包没装完」「插件功能莫名不生效」最常见的原因，且没有任何报错。**
+
+### 机制
+
+pnpm 有一条 `minimumReleaseAge` 策略：**拒绝刚发布、还在窗口内的包版本**，然后 pnpm 会**为范围声明找一个更旧的、满足范围的版本**装上去 —— 不报错。
+
+```
+profile 声明:  "@sparkelf/dsh-plugin-backup": ">=0.2.1-alpha.1"    ← 范围
+刚发布的:      alpha.4（42 分钟前）        → 被窗口拒绝
+回退到:        alpha.1（21 小时前）        → 满足范围且已过窗口 → 装上
+```
+
+### 决定性对照：精确 pin 不会回退
+
+| 声明方式 | pnpm 行为 | 结果 |
+|---|---|---|
+| `"0.2.1-alpha.4"`（精确） | 无路可退 → 写入豁免列表 | **装到正确版本** |
+| `">=0.2.1-alpha.1"`（范围） | 回退到窗口外的旧版 | **静默装旧的** |
+
+实测（2026-10-05，同一镜像、同一构建）：
+
+```
+dsh-plus:           "0.2.1-alpha.4"      → 装 0.2.1-alpha.4  ✓
+dsh-plugin-backup:  ">=0.2.1-alpha.1"    → 装 0.2.1-alpha.1  ✗
+```
+
+**症状组合**（记住这个）：
+- profile `package.json` 声明的版本很新
+- `node_modules` 里装的是旧版
+- **没有任何报错**，构建成功
+- patch 层按名字挂载插件 → 模块在但行为是旧的
+
+### 怎么查
+
+```bash
+# 1) profile 声明的版本 vs 实际装的版本
+CID=$(docker run -d --entrypoint sleep dataops-ai-workspace:local 120)
+docker exec "$CID" sh -c '
+  P=/opt/dataops-dsh-profile-template
+  echo "=== 声明 ==="; grep -E "dsh-(plus|plugin-backup)" $P/package.json
+  echo "=== 实装 ==="
+  for n in dsh-plus dsh-plugin-backup; do
+    node -p "\"  $n: \" + require(\"$P/node_modules/@sparkelf/$n/package.json\").version"; 
+  done'
+docker rm -f "$CID"
+```
+
+```bash
+# 2) 构建日志里的豁免写入（pnpm 自己写的，就是它选了什么版本）
+grep -E 'Added [0-9]+ entries to minimumReleaseAgeExclude' /tmp/build-*.log
+# 看豁免列表里的版本 → 那就是实际装的版本
+```
+
+```bash
+# 3) 对比发布年龄
+curl -s 'https://registry.npmjs.org/@sparkelf/<pkg>' | python3 -c "
+import sys,json; d=json.load(sys.stdin); t=d['time']
+for v in ['0.2.1-alpha.3','0.2.1-alpha.4']: print(v, t.get(v))")
+```
+
+### 修复
+
+**在 profile 的 `pnpm-workspace.yaml` 里关掉窗口**（`assemble-registry-profile.mjs` 已内置）：
+
+```yaml
+minimumReleaseAge: 0
+```
+
+**为什么可以关**：构建是受控环境 —— 每个版本的取值由正在构建的 release 决定，容器也不与窗口要保护的任何东西共享。窗口在这里只带来「范围悄悄指向另一个版本」这一种后果。
+
+**验证方式**（不要只看构建通过）：
+```bash
+cd /tmp && rm -rf t && mkdir t && cd t
+printf '{"name":"t","version":"1.0.0","dependencies":{"@sparkelf/<pkg>":">=x.y.z"}}\n' > package.json
+printf 'packages:\n  - .\nminimumReleaseAge: 0\n' > pnpm-workspace.yaml
+pnpm install --lockfile-only
+grep -oE '<pkg>@[0-9][^ ]*' pnpm-lock.yaml | sort -u   # 应是最新，不是回退版
+```
+
+
+---
+
+## 17. `carry` 在 `install` 之后 = **手工加的依赖永远不会被安装**
+
+### 症状
+
+- patch 层用 insert 挂载了某个插件，`node_modules` 里没有这个包
+- 插件静默不生效，没有任何报错
+
+### 机制
+
+`dsh-plus-mirror create` 的步骤顺序有个缺口：
+
+```
+line 151  installing again ...              <- pnpm install（此时 profile 还没有手工依赖）
+line 175  carrying the reviewed patch ...   <- carry 把手工依赖写进 package.json
+                                              但没人再 install 一次
+```
+
+`carry-profile-state.mjs` **自己知道**这个问题，它会打印：
+
+```
+the profile needs an install for the added dependencies
+```
+
+**但它只打印，不执行安装。**
+
+### 为什么容易漏
+
+手工加的依赖（典型是 file: 指向本地插件）：
+
+```json
+"@sparkelf/dsh-image-hoist": "file:/root/projects/dsh-image-hoist"
+```
+
+它**不在** harness 的 variant 里，所以 `generate-manifest` 不管它、`verify-plus-governance` 不检查它，只有 `carry-profile-state` 会搬它 —— 而搬完没人装。
+
+### 怎么查
+
+```bash
+# patch 层声明了哪些插件，逐个核对是否真的装了
+for p in dsh-image-hoist dsh-plugin-backup; do
+  test -d /root/.dsh/profiles/plus/node_modules/@sparkelf/$p \
+    && echo "  ok       $p" || echo "  MISSING  $p  <- patch 层挂了但没装"
+done
+```
+
+### 修复
+
+`dsh-plus-mirror` 已在 carry 之后补了一次 install。
+
+### 应急修复（不动 mirror）
+
+在 profile 里手工 install 后，**必须**补三步恢复，否则 profile 变 DEFECTIVE：
+
+```bash
+node /root/.dsh/supervisor/repair-shadowed-scope.mjs --release <mirror>
+node /root/.dsh/supervisor/restore-nested-modules.mjs \
+     --release <mirror> --backup <mirror> --reference <健康镜像>
+node /root/.dsh/supervisor/check-profile-scope.mjs --release <mirror>   # 必须 healthy
+```
+
+**实测教训**：在**正在运行**的 profile 上直接 pnpm install，会清掉镜像源码树里 29 个包的嵌套 node_modules。服务不会当场挂（进程已加载），但**下次重启会失败**。
 
