@@ -1,6 +1,6 @@
 ---
 name: dataops-workspace-image-customization
-description: 改 DataOps 工作区镜像（dataops/infra/docker-workspace/）里的 DSH 行为时使用：隐藏弹窗、关闭 onboarding、改插件配置、换 standalone 版本、调 profile 内容。讲清「该改哪一层」（profile 配置 / overlay patch / 官方 Config / 重打包），以及镜像升级时改动不生效的四个真实坑。要改 DSH 在工作区里的任何默认行为前，先读这个。
+description: 改 DataOps 工作区镜像（dataops/infra/docker-workspace/）里的 DSH 行为时使用：隐藏弹窗、关闭 onboarding、改插件配置、换 standalone 版本、调 profile 内容。讲清「该改哪一层」（profile 配置 / overlay patch / 官方 Config / 重打包），以及改动静默失效的一整类坑（peer 不满足、发布年龄窗口、carry 顺序、`- id:` 不能创建行、在运行中的 profile 上 install）。另含「工作区 = 3080 减三类插件」的成员关系判据。要改 DSH 在工作区里的任何默认行为前，先读这个。
 ---
 
 # DataOps 工作区镜像：改 DSH 行为该落在哪一层
@@ -35,6 +35,40 @@ dataops-ai-workspace:local                           ← dataops 仓库构建，
 | 插件的**源码行为** | **重打包**（机制 4），不是改产物 |
 | standalone **版本** | `workspace-recipe.mjs --version <v>` |
 | 后端/工作区服务行为 | dataops 仓库的 `backend/` |
+
+### 插件成员关系：工作区 = 3080 **减去三类**
+
+**这是本技能最容易漏的一条，漏了会让「3080 上有效的改动，工作区完全没有」。**
+
+```
+工作区镜像的插件集  ==  3080（dsh-plus 全量）
+                      −  computer-use（含 cua-driver-mcp）
+                      −  web-search（exa）
+                      −  mobile（手机端）
+```
+
+**除此之外，3080 有的插件工作区都应该有。** 排除项写在各 standalone manifest 的 `exclude` 里（`packages/standalone/*-standalone/package.json`）。
+
+**推论（重要）**：
+
+> 如果某个插件在 3080 上是通过**手工方式**装上的（`file:` 依赖、直接在 profile 里加），
+> 那它**不会自动出现在工作区**。必须走正常分发路径（发 npm → 进 `dsh-plus` bundle → 双 manifest 重生）。
+
+**实测（2026-10-05）**：`dsh-image-hoist` 在 3080 是靠 `file:/root/projects/dsh-image-hoist` 装的，
+结果工作区镜像**从未有过它** —— 不是装失败，是根本不在分发路径上。补法是发到 npm 并加进 bundle。
+
+**怎么查两侧差异**：
+
+```bash
+ls /root/.dsh/profiles/plus/node_modules/@sparkelf/ | sort > /tmp/a.txt        # 3080
+docker exec <ws-container> sh -c 'ls /workspace/.dataops/dsh/profiles/dataops-web/node_modules/@sparkelf/' \
+  | sort > /tmp/b.txt                                                          # 工作区
+echo '仅 3080 有（工作区缺，需补）:';  comm -23 /tmp/a.txt /tmp/b.txt
+echo '仅工作区有（DataOps 专属，正常）:'; comm -13 /tmp/a.txt /tmp/b.txt
+```
+
+预期结果：`dsh-dataops-managed`、`dsh-query-result-analysis` 只在工作区（DataOps 专属）；
+`dsh-plus-standalone` 只在 3080（发行包装，非插件）；**其余应完全一致**。
 
 ---
 
