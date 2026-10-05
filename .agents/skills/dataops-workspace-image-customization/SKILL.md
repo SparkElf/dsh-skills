@@ -700,3 +700,115 @@ node /root/.dsh/supervisor/check-profile-scope.mjs --release <mirror>   # 必须
 
 **实测教训**：在**正在运行**的 profile 上直接 pnpm install，会清掉镜像源码树里 29 个包的嵌套 node_modules。服务不会当场挂（进程已加载），但**下次重启会失败**。
 
+---
+
+## 18. `- id:` **不能创建**行 —— 只会报 `patch: entry "..." not found`
+
+**这是「插件声明了、装了、但完全不生效」最隐蔽的一种。构建通过、包在 node_modules 里、无任何报错。**
+
+### 两种形式的语义
+
+| 写法 | 语义 | 用途 |
+|---|---|---|
+| `- id: xxx` + `config:` | **修改**已存在的行 | 改官方/上游插件的行为 |
+| `- insert:` + `- id:` + **`name:`** | **创建**新行 | 挂载一个新插件 |
+
+**`- id:` 单独出现时，行必须已被某个 bundle 创建过。** 否则 loader 打印：
+
+```
+dsh: [@sparkelf/dsh-plus] patch: entry "image-hoist" not found
+```
+
+**注意这句是 warning，不是 error** —— 构建成功，插件静默不加载。
+
+### 实测（2026-10-05）
+
+```yaml
+# ✗ 错：只改不建
+- id: image-hoist
+  config:
+    providers: []
+
+# ✓ 对：显式创建
+- insert:
+    - id: image-hoist
+      name: '@sparkelf/dsh-image-hoist'
+      config:
+        providers: []
+```
+
+### 为什么容易写错
+
+`config` 那半段两种形式**完全相同** —— 只有 `- insert:` 这一层和 `name:` 字段有区别。凭印象手写时极易漏掉。
+
+### 怎么查
+
+```bash
+# 1) dump-config 看 loader 的真实组合（权威）
+node <release>/apps/cli/lib/bin.js --profile <name> --dump-config 2>&1 \
+  | grep -E '<plugin-id>|not found'
+
+# 2) 出现 'entry "xxx" not found' = 用了 - id: 但没人创建它
+```
+
+```bash
+# 3) 确认包真的装了（装了 ≠ 挂载了）
+test -d <profile>/node_modules/@sparkelf/<name> && echo 已装 || echo 未装
+```
+
+**两者都要查**：包在 node_modules 里但 `not found`，就是本节这个问题。
+
+
+---
+
+## 19. 在已部署的 profile 上跑 `pnpm install` **会静默降级一切范围依赖**
+
+**这条是我自己踩的（2026-10-05），造成 3080 的 Backup 修复失效数小时。**
+
+### 事故经过
+
+为了给 3080 装一个本地插件，我在**正在运行的 profile** 上跑了 `pnpm install`。
+
+```
+改前:  dsh-plugin-backup 0.2.1-alpha.4  （含 Backup 修复）
+改后:  dsh-plugin-backup 0.2.0-rc.52  （修复没了）
+导出:  5 条 → 2 条
+```
+
+**原因**：profile 里这些依赖声明是 `^0.2.0-rc.45`。caret 在 prerelease 上**不跨版本元组** —— `^0.2.0-rc.45` 的上界是 `0.2.0`，永远匹配不到 `0.2.1-alpha.x`。所以 pnpm 重新解析时选了它唯一能满足的 `0.2.0-rc.52`。
+
+**我当时没发现**，因为只检查了「包还在不在」，没检查「导出还是不是 5 条」。
+
+### 规则
+
+**不要在已部署的 profile 上直接 `pnpm install`。** 如果必须：
+
+1. **先把范围声明改成精确版本**
+
+```json
+"@sparkelf/dsh-plugin-backup": "0.2.1-alpha.4"   // 不是 ^0.2.0-rc.45
+```
+
+2. **并在 `pnpm-workspace.yaml` 关掉发布年龄窗口**（见 §16）
+
+3. **装完必须重新验证行为**，不只看文件存在：
+
+```bash
+# 例：Backup 修复的判据是导出条数，不是包版本
+# 修复前 2 条，修复后 5 条
+```
+
+4. **`pnpm install` 会破坏 profile scope**（见 §17），之后要跑：
+
+```bash
+node /root/.dsh/supervisor/repair-shadowed-scope.mjs --release <mirror>
+node /root/.dsh/supervisor/check-profile-scope.mjs --release <mirror>  # 必须 healthy
+```
+
+### 推广到其它场景
+
+同一个模式出现在**任何**用范围声明的依赖上：
+- `^0.2.0-rc.45` 匹配不到 `0.2.1-*`
+- `>=0.1.7-rc.2` 会满足，但可能被年龄窗口回退（§16）
+- 只有**精确版本**是可靠的
+
