@@ -155,6 +155,19 @@ python3 -c "import json;print(json.load(open('/root/.dsh/supervisor/runtime.json
 
 另有 `dsh-3080-restart --status` 可直接看状态（它会打印 unit/supervisor pid/web pid/socket/HTTP）。
 
+### 本机还有一个 3080 在容器里（DataOps 工作区）
+
+DataOps 工作区的 DSH 跑在 companion 容器里，命令行同样是 `--port 3080`，但**它没有发布到宿主机**，所以和宿主机这个 3080 互不相通，却都能返回 200。
+
+| 你要查的 | 该去哪 |
+|---|---|
+| **宿主机这套 DSH**（本技能全部内容） | 宿主机 `127.0.0.1:3080`、`dsh-3080-restart`、`/root/.dsh/supervisor` |
+| **DataOps 工作区那套 DSH** | `docker exec dataops-ai-admin-dsh-runtime …`，重启用 `dataops-dsh-service` 的 `stop` / `ensure` |
+
+**判据**：宿主机的 3080 上 `/integrations/dataops/*` 恒为 404 —— 那些路由由工作区插件注册，不在这一套里。反过来，**别用宿主机的 `dsh-3080-restart` 去重启工作区**，那是两棵不同的进程树。
+
+工作区那套的完整规则（重启、路由自检、插件装配）见技能 `dataops-workspace-image-customization`。
+
 ---
 
 ## 6. 改插件 / 换搜索后端的完整流程
