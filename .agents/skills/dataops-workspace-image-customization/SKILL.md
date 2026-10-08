@@ -1,6 +1,6 @@
 ---
 name: dataops-workspace-image-customization
-description: 改 DataOps 工作区镜像（dataops/infra/docker-workspace/）里的 DSH 行为时使用：隐藏弹窗、关闭 onboarding、改插件配置、换 standalone 版本、调 profile 内容。讲清「该改哪一层」（profile 配置 / overlay patch / 官方 Config / 重打包），以及改动静默失效的一整类坑（peer 不满足、发布年龄窗口、carry 顺序、`- id:` 不能创建行、在运行中的 profile 上 install）。另含「工作区 = 3080 减三类插件」的成员关系判据。要改 DSH 在工作区里的任何默认行为前，先读这个。
+description: 改 DataOps 工作区镜像（dataops/infra/docker-workspace/）或工作区里的 DSH 插件时使用：隐藏弹窗、关闭 onboarding、改插件配置、换 standalone 版本、调 profile 内容、排查「插件路由 404 / 设置面板消失 / 重新连接中」。讲清「该改哪一层」（profile 配置 / overlay patch / 官方 Config / 重打包）、重启 DSH 的正规命令（`dataops-dsh-service`，不是 kill）、宿主与 companion 各有一个 3080 的判据、插件 apply() 的注册顺序契约、volatile 配置是引用、以及一整类静默失效的坑（peer 不满足、发布年龄窗口、carry 顺序、`- id:` 不能创建行、在运行中的 profile 上 install）。另含「工作区 = 3080 减三类插件」的成员关系判据。要改 DSH 在工作区里的任何默认行为前，先读这个。
 ---
 
 # DataOps 工作区镜像：改 DSH 行为该落在哪一层
@@ -310,23 +310,53 @@ docker exec dataops-ai-admin-dsh-runtime bash -c '
 
 ---
 
-## 10. 重启 DSH 的两个坑
+## 10. 重启 DSH：用 `dataops-dsh-service`，不要 kill
 
-**坑 1：`pkill -f 'dsh/lib/bin.js'` 会自匹配。** 命令行里含该字符串的 shell 会被一起杀掉，表现为「重启了但没生效」。用 companion 容器 + 精确 PID：
-
-```bash
-PID=$(docker exec dataops-ai-admin-dsh-runtime bash -c 'pgrep -f "bin.js --profile" | head -1')
-docker exec dataops-ai-admin-dsh-runtime bash -c "kill $PID"
-```
-
-**坑 2：杀掉后 DSH 不会自己起来。** 通过后端的 ensure 拉起（这是唯一正规入口）：
+**正规入口只有一条**，就是镜像里那个 CLI，它同时是后端执行白名单里的命令（`ai-workspace-runtime-operations-provider.ts` 与 DTO 的校验正则都认它）：
 
 ```bash
-curl -s -X POST "http://127.0.0.1:3101/api/ai/workbench/dsh/ensure" \
-  -H "Authorization: Bearer $TOKEN" -H 'Origin: http://localhost:3000'
+C=dataops-ai-admin-dsh-runtime          # DSH 只在这个容器里跑
+docker exec $C dataops-dsh-service status
+docker exec $C dataops-dsh-service stop
+docker exec $C dataops-dsh-service ensure
 ```
 
-**每次改完 overlay，都必须走「重启 DSH → 重新 ensure → 取页面」这条链**，只改文件不重启等于没改。
+实测语义：
+
+| 命令 | 行为 |
+|---|---|
+| `status` | 输出 JSON：`state` / `ready` / `pid` / `profile` / `sourceRef` |
+| `stop` | 停进程并置 `state:"stopped"` |
+| `ensure` | **幂等**：已在跑就不动（实测 pid 不变），停着才拉起 |
+
+**在 `dataops-ai-admin` 里执行会直接报错**，这是设计：
+
+```
+ServiceError: Managed DSH must run in the isolated DataOps companion container.
+```
+
+**别再用 kill 拼重启。** 三个理由，每个都实测过：
+
+1. `pkill -f 'dsh/lib/bin.js'` 会自匹配，把命令行含该串的 shell 一起杀掉。
+2. 靠 PID kill 之后进程**不会自己起来**，必须再 `ensure`；漏了这步就是「改了文件但一直没生效」。
+3. `stop` 会走完整的停止流程（置状态、回收），kill 只会留下半死进程 —— 症状是端口还在听、路由却全 404。
+
+**每次改完 overlay / 插件产物，都要走「stop → ensure → `status` 确认 ready → 取页面」这条链**，只改文件不重启等于没改。
+
+### 重启后必须确认路由回来了（别只看端口）
+
+DSH 进程活着 `/` 也会返回 200，**但插件路由可能是 404**。「端口通 = 起来了」是错的判据：
+
+```bash
+# 在 companion 里查（不是宿主机，见 §21）
+docker exec dataops-ai-admin-dsh-runtime bash -lc '
+  for p in managed-auth model-sync skill-plaza workspace-limits; do
+    printf "%-16s %s\n" "$p" \
+      "$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3080/integrations/dataops/$p)"
+  done'
+```
+
+期望：`managed-auth` GET=405（它只收 POST，**405 是正常的**）、其余三个 GET=200。任何一个 404 都说明插件没装配上，去 web.log 找原因。
 
 ---
 
@@ -845,4 +875,191 @@ node /root/.dsh/supervisor/check-profile-scope.mjs --release <mirror>  # 必须 
 - `^0.2.0-rc.45` 匹配不到 `0.2.1-*`
 - `>=0.1.7-rc.2` 会满足，但可能被年龄窗口回退（§16）
 - 只有**精确版本**是可靠的
+
+---
+
+## 20. 构建速度：**别杀 buildkit 子进程** + 快速迭代路径
+
+### 一、`kill buildkit` 会把层缓存清空（我踩过）
+
+为了「防止缓存挂载被占用」，我写过一个清理：
+
+```bash
+# ✗ 错误：这杀的是 buildkit 自己的工作进程 → 层缓存全失效
+for q in $(ps -eo pid,cmd | grep -E '[r]unc.*buildkit' | awk '{print $1}'); do
+  for c in $(pgrep -P $q); do kill -9 $c; done
+  kill -9 $q
+done
+```
+
+**实测对照**（同一台机器、同一 Dockerfile）：
+
+| 操作 | 结果 | 耗时 |
+|---|---|---|
+| 不改任何东西直接重跑 | 33 层 CACHED | **1 秒** |
+| 先跑上面的清理再构建 | 0 层 CACHED | **820 秒** |
+
+**正确做法**：只清理真正的孤儿构建进程（`build-and-verify.mjs`），**不要动 buildkit**：
+
+```bash
+pkill -f 'build-and-verify.mjs'    # 只杀构建脚本本身
+# 然后等几秒，让 docker 自己回收
+```
+
+### 二、版本 ARG 的位置决定重建代价
+
+```dockerfile
+# Dockerfile 第 86 行
+ARG DSH_STANDALONE_VERSION=0.2.1-alpha.6
+```
+
+**这个 ARG 一变，它之后的 30+ 层全部失效。** 但真正用到它的只有 5 处：
+
+```
+113  npm install ${DSH_STANDALONE_PACKAGE}@${DSH_STANDALONE_VERSION}
+212  写 .dataops-source-ref
+264  写 profile 的 source-ref
+416  ENV DATAOPS_DSH_SOURCE_REF
+```
+
+**结论**：换版本 ≈ 13 分钟；只改插件/overlay（版本不变）≈ 1-2 分钟。
+
+### 三、三档速度，选对档次
+
+| 场景 | 方式 | 耗时 |
+|---|---|---|
+| **开发迭代** | `bundle` → `docker cp` 进容器 → 重启 DSH | **~30 秒** |
+| **改 overlay/profile** | 直接改容器内文件 + 重启 DSH | **~30 秒** |
+| **改插件源码** | 上面 + `pnpm --filter <pkg> bundle`（实测 5 秒） | **~40 秒** |
+| **重建镜像（版本不变）** | `node build-and-verify.mjs` | **1-2 分钟** |
+| **重建镜像（换版本）** | 同上，但 ARG 连坐 | **~13 分钟** |
+| **正式发布** | `ship.ts --prerelease alpha.N`（PR + CI + 合并） | **~10 分钟** |
+
+**不要每轮都走完整链路。** 迭代用快速路径，最后一次走正式链路。
+
+```bash
+# 快速验证插件改动（不碰 npm、不重建镜像）
+pnpm --filter @sparkelf/<pkg> bundle                      # 5 秒
+docker cp packages/<pkg>/lib/. <容器>:/opt/dsh-plus/node_modules/@sparkelf/<pkg>/lib/
+# 或（工作区侧）
+docker cp packages/<pkg>/lib/. dataops-ai-admin-dsh-runtime:/workspace/.dataops/dsh/profiles/dataops-web/node_modules/@sparkelf/<pkg>/lib/
+# 重启 DSH
+```
+
+**注意**：`docker cp` 只适合验证，**产物必须走正式链路才算交付**。
+
+---
+
+## 21. 宿主机也有一个 3080 —— 别在错的服务器上验证
+
+**这是本次最贵的一个坑：我在宿主机上对着自己的 DSH 查了半小时「工作区插件为什么 404」。**
+
+拓扑（实测）：
+
+| 监听 | 归属 | `/` | `/integrations/dataops/*` |
+|---|---|---|---|
+| `127.0.0.1:3080`（宿主机） | **宿主机自己的 DSH**（`apps/cli/lib/bin.js --profile plus`） | 200 | **404** |
+| `127.0.0.1:3080`（companion 容器内） | **工作区 DSH**（`--profile dataops-web`） | 200 | **200** |
+
+两者都返回 200，所以「curl 得通」完全不能区分。工作区的 3080 **没有发布到宿主机**（companion 与 admin 共 netns，admin 只发布了 `43117→127.0.0.1:44620`），因此宿主机根本访问不到它。
+
+**规则：查工作区插件路由，必须在容器里查。**
+
+```bash
+# ✗ 错：这是宿主机自己的 DSH，永远 404
+curl -s http://127.0.0.1:3080/integrations/dataops/workspace-limits
+
+# ✓ 对
+docker exec dataops-ai-admin-dsh-runtime bash -lc \
+  'curl -s http://127.0.0.1:3080/integrations/dataops/workspace-limits'
+```
+
+**另一个混合坑**：访问插件路由要走**工作区网关**（`localhost:32008`），它会把同源请求转给 companion 的 3080。在宿主机上直接打 `32008` 会得到 `403 Forbidden`（网关只认浏览器带来的会话），**这也不是故障** —— 要在容器里、带会话地打。
+
+**排错时的判据**：`GET /integrations/dataops/<name>` 返回 **404** 才说明路由没注册；`403` 是网关鉴权，`405` 是方法不对（`managed-auth` 正常就返回 405）。三者含义完全不同，别混。
+
+---
+
+## 22. 插件 `apply()` 的注册顺序：启动期失败必须**不能**吃掉路由
+
+**这一类 bug 会让设置面板整个消失，而且没有任何报错。**
+
+症状组合（记住）：
+
+- 前端页面提示「重新连接中」/ 连接失败
+- `POST /integrations/dataops/managed-auth` 返回 **405**（方法不允许 = 路由在，但只收 POST）或 **404**（路由根本没注册）
+- web.log 里能看到插件那一行报错，但**不会有「插件未装配」之类的醒目告警**
+
+**根因**：`apply()` 里有一段「启动期连接 DataOps」的代码（`ensureMcp()`），它 `await` 了 MCP 连接，而且**写在注册路由之前**。存量 JWT 过期 / DataOps 暂时不可达时它会抛 —— 于是 `apply()` 在注册任何路由之前就中断了，插件的四条路由一条都没挂上。
+
+**这是插件的缺陷，不是环境问题**：一个「DataOps 连不上」的状态，恰恰是设置面板**应该显示**的状态，却因为抛异常让面板自己都起不来。
+
+修法（顺序即契约）：
+
+```ts
+export async function apply(ctx, config) {
+  // 1) 先把路由全部注册掉
+  ctx.effect(() => ctx.webServer.register({ ... }), '...: managed-auth route')
+  // ... 其余三条
+
+  // 2) 最后才尝试连接；连接失败只记录，不抛出
+  await connectExisting()
+}
+```
+
+```ts
+const connectExisting = async () => {
+  if (await ctx.credentials.resolve(accessRef) === undefined) return
+  try {
+    await ensureMcp()
+  } catch (error) {
+    ctx.logger.warn('connecting the DataOps MCP server failed; settings routes stay up so a new JWT can be connected')
+    ctx.logger.warn(error)
+  }
+}
+```
+
+**推广**：任何 `apply()` / `start()` 里「对外部系统的 `await`」都不能排在「注册自己的对外接口」之前。**注册在前，连接在后，连接失败只记不抛。**
+
+**验证**：宿主侧写一个 stub 上下文（`credentials.resolve` 返回 token、`plugin()` 返回一个 `await` 必 reject 的 fiber），断言四条路由**依然注册**、路由在「凭证被拒」时回 503 而不是 404。
+
+---
+
+## 23. `volatile` 配置字段是**引用**，不是值
+
+`Config` 里标了 `.volatile()` 的字段（本插件是 `modelSync` / `settingsSync`），运行时交给插件的是 `Volatile<T>` 引用对象，**不是 T 本身**。直接读字段读到的是那个引用。
+
+```ts
+// ✗ 错：读到的是引用对象，config.modelSync.detached 恒为 undefined
+const state = config.modelSync
+
+// ✓ 对：DSH 自己的写法（见 packages/llm/llm-deepseek/src/config.ts）
+import { isVolatile } from '@deepseek-ai/cosmokit'
+const state = isVolatile(config.modelSync) ? config.modelSync.get() : config.modelSync
+```
+
+**为什么会突然暴露**：`@deepseek-ai/schemastery` 的 `volatile()` 返回类型在 3.18.4 才收紧成 `Volatile<T>`。
+
+**连带教训 —— peer 范围要跟着能力走**：插件原先声明 `schemastery: ">=3.18.1"`，但 `volatile()` 的引用语义从 **3.18.4** 才有。声明一个不提供该能力的版本下限，等于允许一份**会在运行时静默读错值**的装配。同类正确写法见 `packages/mobile-bridge/package.json`（`">=3.18.4"`）。
+
+**判据**：用到某个 API 的返回值/语义时，peer 下限要盯**该 API 的引入版本**，不是「能装上就行」。
+
+---
+
+## 24. 面板能力清单：重设计前先对账
+
+重写 UI 时把旧版搬空了一半才发现 —— **先列清单再动手**。
+
+设置面板重写前的自查：
+
+```bash
+# 旧版暴露了哪些动作？
+git show <old>:<section>.tsx | grep -nE "post[A-Za-z]+\(|action:|onClick"
+# 新版还剩哪些？
+grep -nE "post[A-Za-z]+\(|action:|onClick" <section>.tsx
+```
+
+逐条对照「动作 / 字段 / 开关」三类，确认没有静默丢功能。本次差点丢掉「按模型共享」相关的行，是靠这条对账发现的。
+
+**同时记住设计规范在哪**：官方 token 与尺寸以 `packages/client/ui-theme/src/styles/design-platform.css` 为准（字号 `--dsw-font-*`、圆角 `--dsw-radius-*`、卡片 `--dsw-alias-settings-card-fill/-stroke`）；可复用控件从 `@deepseek-ai/dsh-client-ui-primitives` 取（`Switch` / `Button` / `SettingsValueField` / `StateDot` / `fileSizeText` / `Tag` …）。**不要手搓开关，不要自造字号。**
 
