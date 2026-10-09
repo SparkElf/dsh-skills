@@ -1372,3 +1372,127 @@ client.request({ method: 'tools/call', ... }, schema, { signal: exec.signal, tim
 
 DataOps 后端在 MCP 查询路径上**没有 2 分钟常量**（`ai-data-query-mcp.service.ts` / `ai-dsh-embedded-data-query.service.ts` / `ai-mcp.service.ts` 里 `120000` 计数均为 0）。服务端真实上限是另一组：PostgreSQL 客户端默认 `statement_timeout` **12000（12 秒！）**（`execute_sql` 调用时**不传** `queryTimeoutMs`，走的就是它）、SQL 数据源 5 分钟、API 资源 40 分钟、Workspace guidance 默认 60 秒。**「查一会儿就失败」优先怀疑那个 12 秒，而不是 2 分钟。**
 
+
+## 30. 本机容器化部署 DataOps（浏览器走 IP 而不是 localhost）
+
+要在本机模拟内网，就得让浏览器用**网卡 IP** 访问，而不是 localhost。仓库已自带这条路径：
+`scripts/start-local-cluster.sh`（网关 + 前端 + 后端 + 可选 BPMN，后端不发布端口）。
+
+### 30.1 起手
+
+```bash
+cd /root/projects/dataops
+bash scripts/start-local-cluster.sh start --port 8080 \
+  --backend-image dataops/backend:local --frontend-image dataops/frontend:local \
+  --env /tmp/dataops-cluster.env --name dataops \
+  --work-dir /root/projects/dataops/.dataops-cluster
+```
+
+脚本会自己校验 `DATAOPS_PUBLIC_APP_ORIGIN`，**缺了就直接拒绝启动**并提示填什么。它必须等于浏览器
+实际看到的 origin（如 `http://49.10.1.7:8080`）；不填时后端回落 `http://localhost:3000`，内网下
+DSH 只会以 403 拒绝打开，日志里那条 `ai.workspace_web_gateway.browser_provenance_rejected`
+不会告诉你是配置缺失。
+
+应用真正入口是 **`/ai/dsh`**。`/ai/` 是构建产物里的静态资源目录（`context-*.png`），没有 index，
+返回 **403 是正确行为**，不是故障。
+
+### 30.2 四个坑（每个都以误导性的报错出现）
+
+**(1) 构建上下文不能带 `node_modules`。** Dockerfile 自己跑 `npm ci` / `pnpm install`。
+把宿主 `node_modules` 复制进上下文会导致两件事同时发生：
+
+- overlay2 合并层报 `cannot replace to directory /var/lib/docker/overlay2/.../node_modules/@aws-sdk/client-s3 with file`；
+- pnpm 把陈旧的 docmost 状态当成「需要重装」，**弹交互式确认**（`The modules directories will be removed and reinstalled from scratch. Proceed?`），构建永远停在那里。
+
+对策：上下文只放源码，用一条统一规则：
+
+```
+node_modules
+**/node_modules
+.git
+**/.git
+dist
+**/dist
+.dataops
+**/.dataops
+.env
+**/.env
+*.log
+**/*.log
+coverage
+**/coverage
+.docmost-embedded
+**/.docmost-embedded
+```
+
+**(2) apt 镜像必须用 HTTP。** builder 阶段要先装 `ca-certificates` 才第一次有信任库；在那之前
+HTTPS 源必然握手失败。真实日志是：
+
+```
+W: .../InRelease: No system certificates available. Try installing ca-certificates.
+E: Failed to fetch ... Certificate verification failed: The certificate is NOT trusted.
+E: Package 'ca-certificates' has no installation candidate
+```
+
+最后一行会把人引向「没有这个包」，其实是**证书**问题。用
+`--build-arg DEBIAN_MIRROR_URL=http://mirrors.huaweicloud.com/debian`（HTTP）即可。
+
+**(3) `docker --env-file` 不剥引号。** `.env` 写成 `DATABASE_URL="postgresql://..."`，经
+`--env-file` 传给进程时**引号是值的一部分**，于是：
+
+```
+TypeError: Invalid URL { code: 'ERR_INVALID_URL',
+  input: '"postgresql://postgres:localdev@host.docker.internal:5436/dataops_auth?schema=public"' }
+```
+
+注意 `input` 里那对引号 —— 一眼就能认出来。容器会一直 `Restarting`。
+**Node 自己的 `--env-file` 会剥引号，Docker 不会**，两个入口行为不同。同一份文件两处用时先去掉引号。
+
+**(4) 从 WSL 内部访问「容器发布的端口」会 000 —— 不代表部署坏了。**
+
+mirrored 模式下从 WSL 访问自己的网卡 IP:8080 会命中 `iptables` 的 DNAT：
+
+```
+DNAT tcp dpt:8080 to:172.19.0.4:80
+```
+
+回包路径被重置，curl 报 `Recv failure: Connection reset by peer`，**但 nginx 访问日志里是 200**。
+判据：
+
+| 目标 | 127.0.0.1 | 网卡 IP |
+| --- | --- | --- |
+| 普通 nginx 容器（`-p 18099:80`） | 200 | **000** |
+| 本机宿主进程（vite:3000） | — | **200** |
+
+**要用 Windows 侧实测**：
+
+```bash
+cat > /mnt/c/Windows/Temp/t.ps1 <<'PS'
+$r = Invoke-WebRequest -Uri "http://49.10.1.7:8080/" -TimeoutSec 15 -UseBasicParsing
+Write-Output ("status " + $r.StatusCode + " " + $r.Content.Length + " bytes")
+PS
+timeout 120 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\Windows\Temp\t.ps1'
+```
+
+实测 `49.10.1.7:8080` 与 `41.10.1.7:8080` 都是 200。（注意 heredoc 里的 `$IP` 会被 WSL 提前展开，
+用 write 工具落盘再执行，或把变量拼进字符串。）
+
+### 30.3 依赖服务
+
+- **PostgreSQL**：宿主 `dataops-local-pg` 发布在 **5436**；容器经 `host.docker.internal:5436` 访问。
+  `.env` 里的 `127.0.0.1` 在容器内指向容器自己，必须替换。
+- **Redis**：`.env` 指向 6379，但本机**默认没有**任何 Redis，缺失时 `/api/health` 报
+  `redis: ADMIN_REDIS_UNAVAILABLE`（status `degraded`）。补一个即可：
+  `docker run -d --name dataops-cluster-redis -p 6379:6379 redis:7-alpine redis-server --requirepass <pw>`。
+- **BPMN Server**：不给 `--bpmn-image` 就跳过，脚本会明确告警；审批流程与流程 worker 不可用，其余正常。
+
+### 30.4 成功判据（实测基线）
+
+```
+/api/health -> {"status":"up","dependencies":{"database":{"status":"up"},
+  "secretStore":{"status":"up"},"redis":{"status":"up"},
+  "doris| loki |objectStorage":"not-applicable"}}
+```
+
+资源占用合计约 **432 MiB**（gateway 17.7 / frontend 13.8 / backend 395 / redis 5.4），镜像 2.34 GB。
+
