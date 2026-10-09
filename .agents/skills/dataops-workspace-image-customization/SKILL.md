@@ -1192,3 +1192,46 @@ git merge-base --is-ancestor <修复 commit> <tag> && echo YES || echo NO   # �
 
 **YES 才继续**；NO 就只有等上游发版，或者先 rebase 全部 23 个补丁到新版本树上（那是另一个量级的工程）。不要用「改小 `PACKAGED_FILES`」「跳过校验」之类的办法硬发 —— 那正是这类静默失效的来源。
 
+---
+
+## 28. 换镜像后所有插件路由 404 —— 先清 `.dsh-market`
+
+**症状**：新镜像、profile marker 与模板**完全一致**、插件版本**正确**、`dataops-managed` 能独立 `import`、启动日志里**没有任何报错** —— 但五个路由全 404，连 `_dataops/session` 也 404。`dataops-dsh-service status` 报 `ready:true`。
+
+**判据**：404 分两种，先分清是「插件没注册」还是「服务器根本没有这个 app」：
+
+```bash
+# 服务器在，说明不是进程问题
+docker exec <companion> curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/      # 200
+# 插件路由 404，且连 plus 的路由也 404 = 一片都没注册
+docker exec <companion> curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/integrations/plus-backup/status
+```
+
+**根因**：profile 目录在**持久卷**里，模板里没有 `.dsh-market/`（那是 dshmarket 自己写的运行时目录）。marker 变了触发 `copytree`，但它是**覆盖式复制，不删除**模板里没有的文件 —— 于是上一轮留下的 `.dsh-market/hot-*.yml`（含 `mkt-client--*` 热挂载条目）跟着新 profile 一起启动，其中一条与正式条目冲突：
+
+```
+Error: command "export" is already registered
+  at .../@deepseek-ai/dsh-session-log-export/lib/index.js
+dsh: warning: 1 entry did not activate
+```
+
+一条 entry 没激活，整棵插件树就没走完，所有后续路由都不注册。**报错行在几万行日志的中间，`tail` 看不到。**
+
+**修法**（按顺序）：
+
+```bash
+C=dataops-ai-admin-dsh-runtime
+P=/workspace/.dataops/dsh/profiles/dataops-web
+# 1. 先看它是不是残留（模板里有没有）
+docker run --rm --entrypoint bash dataops-ai-workspace:local -lc \
+  'ls -d /opt/dataops-dsh-profile-template/.dsh-market 2>/dev/null || echo "not in template"'
+# 2. 挪走（不要 rm，留着对比）
+docker exec $C bash -lc "mv $P/.dsh-market $P/.dsh-market.stale-\$(date +%s)"
+# 3. 重启，再验路由
+docker exec $C dataops-dsh-service stop && docker exec $C dataops-dsh-service ensure
+```
+
+这次实测：挪走后**五个路由同时恢复**（`managed-auth 405` / `model-sync 200` / `skill-plaza 200` / `workspace-limits 200` / `tool-timeout 200`）。
+
+**下次排查顺序**：marker 一致 + 版本正确 + 无报错 = **不要再去查镜像**，去查持久卷里比模板多的东西。
+
