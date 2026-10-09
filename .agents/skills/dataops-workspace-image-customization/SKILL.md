@@ -1,6 +1,6 @@
 ---
 name: dataops-workspace-image-customization
-description: 改 DataOps 工作区镜像（dataops/infra/docker-workspace/）或工作区里的 DSH 插件时使用：隐藏弹窗、关闭 onboarding、改插件配置、换 standalone 版本、调 profile 内容、排查「插件路由 404 / 设置面板消失 / 重新连接中」。讲清「该改哪一层」（profile 配置 / overlay patch / 官方 Config / 重打包）、重启 DSH 的正规命令（`dataops-dsh-service`，不是 kill）、宿主与 companion 各有一个 3080 的判据、插件 apply() 的注册顺序契约、volatile 配置是引用、以及一整类静默失效的坑（peer 不满足、发布年龄窗口、carry 顺序、`- id:` 不能创建行、在运行中的 profile 上 install）。另含「工作区 = 3080 减三类插件」的成员关系判据。要改 DSH 在工作区里的任何默认行为前，先读这个。
+description: 改 DataOps 工作区镜像（dataops/infra/docker-workspace/）或工作区里的 DSH 插件时使用：隐藏弹窗、关闭 onboarding、改插件配置、换 standalone 版本、调 profile 内容、排查「插件路由 404 / 设置面板消失 / 重新连接中 / HTML 预览打不开」。讲清「该改哪一层」（profile 配置 / overlay patch / 官方 Config / 重打包）、重启 DSH 的正规命令（`dataops-dsh-service`，不是 kill）、宿主与 companion 各有一个 3080 的判据、插件 apply() 的注册顺序契约、volatile 配置是引用、npm 补丁为什么装了却不生效（`dsh-plus apply` 与 `patchedDependencies`）、插件功能为什么跟着发行版 pin 走（以及版本号被复用的坑），以及一整类静默失效的坑（peer 不满足、发布年龄窗口、carry 顺序、`- id:` 不能创建行、在运行中的 profile 上 install）。另含「工作区 = 3080 减三类插件」的成员关系判据。要改 DSH 在工作区里的任何默认行为前，先读这个。
 ---
 
 # DataOps 工作区镜像：改 DSH 行为该落在哪一层
@@ -1062,4 +1062,90 @@ grep -nE "post[A-Za-z]+\(|action:|onClick" <section>.tsx
 逐条对照「动作 / 字段 / 开关」三类，确认没有静默丢功能。本次差点丢掉「按模型共享」相关的行，是靠这条对账发现的。
 
 **同时记住设计规范在哪**：官方 token 与尺寸以 `packages/client/ui-theme/src/styles/design-platform.css` 为准（字号 `--dsw-font-*`、圆角 `--dsw-radius-*`、卡片 `--dsw-alias-settings-card-fill/-stroke`）；可复用控件从 `@deepseek-ai/dsh-client-ui-primitives` 取（`Switch` / `Button` / `SettingsValueField` / `StateDot` / `fileSizeText` / `Tag` …）。**不要手搓开关，不要自造字号。**
+
+---
+
+## 25. patch 包装了 ≠ patch 生效了（最贵的一条）
+
+**症状**：HTML 预览打不开，宿主把工作区相对路径 `/ielts-trainer/index.html` 当根路径去 stat，回 ENOENT。四个 `dsh-better-sidebar` 补丁**都装了**，但一个都没生效。
+
+**判据**：补丁包装在 `node_modules` 里是「已安装」，**和「已应用」从外面看完全一样** —— 所以构建、启动、所有断言全绿，补丁却没进树。
+
+一个命令看穿：
+
+```bash
+docker exec <companion> node -e "
+const s=require('node:fs').readFileSync('<profile>/node_modules/dsh-better-sidebar/lib/index.js','utf8');
+console.log('patched mark:', (s.match(/htmlCwd/g)||[]).length);   // 0 = 没生效
+console.log('pre-patch line:', s.includes('const { sessionId, path } = decoded.ref'));  // true = 没生效
+"
+```
+
+**根因**：npm 补丁靠 profile 的 `pnpm-workspace.yaml` 里 `patchedDependencies` 条目生效，而写这个条目的是 `dsh-plus apply`。**这条命令要求一个 HEAD 等于发行版 base revision 的官方 DSH git checkout** —— registry 安装根本没有 checkout。
+
+镜像曾经用 git 源码构建，那一版的 Dockerfile 里有：
+
+```dockerfile
+node .../bin.js plugin --profile <name> exec dsh-plus apply --dsh-root /opt/dsh-plus
+```
+
+**改成 registry 安装时这一步被丢掉了**（commit `5682623`），此后每个镜像都没有补丁。
+
+**修法**：`infra/docker-workspace/materialize-npm-patches.mjs` 替代该命令 —— 读发行版装的补丁包，取 `target.kind === 'npm'` 的变体，把 `patchedDependencies` 块写进 profile；随后的 `plugin install` 就会打上补丁。
+
+三条硬约束，每条都踩过：
+
+| 约束 | 违反后的症状 |
+|---|---|
+| **必须在 profile 自己的 install 之前跑** | 装完再写：lockfile 与条目不符，pnpm 的 `--frozen-lockfile` 报 `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH` = 构建失败 |
+| **必须零依赖（不 import yaml/semver）** | 此刻 profile 还没有 `node_modules`，`ERR_MODULE_NOT_FOUND: yaml` = 构建失败 |
+| **落在 install 根目录，不在 profile 里** | 放 profile 里则解析不到发行版；放 install 根（`$DSH_INSTALL_DIR`）才对 |
+
+**只管 npm 变体**：`dsh-source` 变体改的是官方包，而 standalone 的 `overrides` 已经把官方包换成「已打过补丁的重发布包」，没有 checkout 可打，也不该打。
+
+**构建里必须有一条断言**，否则下次重构又会静默丢掉（这次就是）：
+
+```dockerfile
+grep -q 'htmlCwd' "${profile}/node_modules/dsh-better-sidebar/lib/index.js"
+```
+
+---
+
+## 26. 发行版 pin 的是插件版本 —— 面板功能跟着 pin 走
+
+**症状**：设置面板里文件大小那一块整体 404，而同插件的其他路由 200。
+
+**判据**：不要怀疑插件代码，先看**发行版 pin 了哪个插件版本**：
+
+```bash
+# 运行中的 profile 实际装的是哪个版本
+docker exec <companion> node -e "console.log(require('<profile>/node_modules/@sparkelf/dsh-dataops-managed/package.json').version)"
+# 它注册了哪些路由（路由是版本的函数）
+docker exec <companion> grep -o 'integrations/dataops/[a-z-]*' <profile>/node_modules/@sparkelf/dsh-dataops-managed/lib/index.js | sort -u
+```
+
+本次：镜像装的是 `0.3.13`（**没有** `workspace-limits` 路由），而带该路由的是 `0.3.14`、带面板重设计的是 `0.3.15`。pin 在 `packages/bundle/plus/package.json` 的 `dshPlus.profile.standaloneVariants.dataops.includePackages`。
+
+**最坑的一点：版本号可能被复用。** 我先查到「0.3.14 已发布且有 limits 路由」，就把 pin 改成 0.3.14 —— 但**已发布的 0.3.14 是旧构建**，没有我后来加的注册顺序修复和面板重设计（对比 md5 才看出来）。**发新内容必须发新版本号**，改完源码要 bump：
+
+```bash
+# 发布前先确认 registry 上那个版本里到底有什么
+cd /tmp && npm pack @sparkelf/<pkg>@<version> >/dev/null && tar xzf *.tgz
+grep -c '<你刚加的标记>' package/lib/index.js   # 0 = 那个版本里没有
+```
+
+**改 pin 的完整链路**（少一步 gate 就红）：
+
+```bash
+# 1. 改两个 manifest 里的 pin（bundle + standalone）
+# 2. 重新生成 standalone manifest（它写着 pin）
+npx tsx scripts/standalone/generate-manifest.ts --distribution packages/bundle/plus \
+  --out packages/standalone/dataops-standalone/package.json --runtime-version <dsh 版本> --variant dataops
+# 3. 刷新 lockfile
+pnpm install --lockfile-only
+# 4. 三个 gate
+pnpm run verify:plus-governance && pnpm run verify:standalone-manifest && pnpm run verify:standalone-variants
+```
+
+最后走 `release:ship` 发版，再把 `infra/docker-workspace/Dockerfile` 的 `DSH_STANDALONE_VERSION` 提到新版本重建 —— **pin 改了但没发版，工作区拿到的还是旧插件。**
 

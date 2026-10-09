@@ -21,7 +21,7 @@
     },
     {
       "name": "dataops-workspace-image-customization",
-      "description": "改 DataOps 工作区镜像（dataops/infra/docker-workspace/）或工作区里的 DSH 插件时使用：隐藏弹窗、关闭 onboarding、改插件配置、换 standalone 版本、调 profile 内容、排查「插件路由 404 / 设置面板消失 / 重新连接中」。讲清「该改哪一层」（profile 配置 / overlay patch / 官方 Config / 重打包）、重启 DSH 的正规命令（`dataops-dsh-service`，不是 kill）、宿主与 companion 各有一个 3080 的判据、插件 apply() 的注册顺序契约、volatile 配置是引用、以及一整类静默失效的坑（peer 不满足、发布年龄窗口、carry 顺序、`- id:` 不能创建行、在运行中的 profile 上 install）。另含「工作区 = 3080 减三类插件」的成员关系判据。要改 DSH 在工作区里的任何默认行为前，先读这个。",
+      "description": "改 DataOps 工作区镜像（dataops/infra/docker-workspace/）或工作区里的 DSH 插件时使用：隐藏弹窗、关闭 onboarding、改插件配置、换 standalone 版本、调 profile 内容、排查「插件路由 404 / 设置面板消失 / 重新连接中 / HTML 预览打不开」。讲清「该改哪一层」（profile 配置 / overlay patch / 官方 Config / 重打包）、重启 DSH 的正规命令（`dataops-dsh-service`，不是 kill）、宿主与 companion 各有一个 3080 的判据、插件 apply() 的注册顺序契约、volatile 配置是引用、npm 补丁为什么装了却不生效（`dsh-plus apply` 与 `patchedDependencies`）、插件功能为什么跟着发行版 pin 走（以及版本号被复用的坑），以及一整类静默失效的坑（peer 不满足、发布年龄窗口、carry 顺序、`- id:` 不能创建行、在运行中的 profile 上 install）。另含「工作区 = 3080 减三类插件」的成员关系判据。要改 DSH 在工作区里的任何默认行为前，先读这个。",
       "path": ".agents/skills/dataops-workspace-image-customization/SKILL.md"
     },
     {
