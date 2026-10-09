@@ -1282,3 +1282,93 @@ docker exec $C bash -lc "sed -n '$L,\$p' /workspace/.dataops/dsh/logs/web.log | 
 
 **排查顺序**：先轮询 30 秒确认不是等待窗口 → 再按启动分段 grep 服务端日志 → 最后才是怀疑镜像。
 
+
+## 29. 设置面板「保存」永远失败：CLI overlay 把该键钉死了（附一堆诊断坑）
+
+**症状**：面板里改任何值 → 保存 → 报错（前端可能只显示泛化错误）。改回原值也一样失败。实测报的是：
+
+```
+Configuration for "dataops-managed" is overridden by a home patch or command-line overlay
+```
+
+**根因**：镜像用 `--patch /opt/dataops-runtime/src/dataops-dsh-embedded.patch.yml` 启动 DSH。overlay 在 `cordis.patch.yml` **之后**参与组合，冲突时**它赢**。设置编辑器（`@deepseek-ai/dsh-config-editor`）的写法是：写 profile 的 `cordis.patch.yml` → 重新组合 → 比对刚写入的 config 与组合结果；只要 overlay 里还写着同一个键，比对必然不等，于是**拒写**。
+
+所以 **overlay 里的键 = 只读钉死**。判断方法：
+
+```bash
+# overlay 里有没有这个键
+grep -n 'toolCallTimeoutMs' /opt/dataops-runtime/src/dataops-dsh-embedded.patch.yml
+```
+
+**修法**：可编辑的值**不要**写进 CLI overlay，靠插件 schema 的 `default()` 给初值；overlay 只留运维必须钉死的键（本例：`baseUrl` / `serverName` / `credentialRef` —— 它们决定插件连哪个后端、用谁的凭证）。
+
+要留初值又不钉死，放进 **profile 自己的 `cordis.patch.yml`** —— 那正是编辑器写入的那一层，而且 `prepare_profile()` 会在模板刷新时把它**原样保留**：
+
+```python
+user_patch = PROFILE_DIR / "cordis.patch.yml"
+if user_patch.is_file():
+    shutil.copy2(user_patch, staging / user_patch.name)
+```
+
+**实测（只把该键从 overlay 移除，其余不动）**：
+
+| 步骤 | 结果 |
+|---|---|
+| `GET tool-timeout` | `{"toolCallTimeoutMs":300000}`（插件默认值生效） |
+| 配置行仍然生效 | `managed-auth: 405`（MCP 客户端照样挂载） |
+| `POST 90000` | `{"toolCallTimeoutMs":90000}` |
+| `GET` 回读 | `{"toolCallTimeoutMs":90000}` |
+| 落到哪 | profile `cordis.patch.yml` → `config: {toolCallTimeoutMs: 90000}` |
+
+**这条 100% 会误导你的四件事**（我都踩了）：
+
+1. **先查 overlay，别先查代码**。先怀疑 `apply()` 路由、schema、volatile —— 全不是。是组合顺序。
+2. **只删那一行没用**。我以为删掉 `toolCallTimeoutMs` 就解锁了 —— 没用，还是同样的报错。**必须整行从 overlay 移除**（我是把整个 `- id: dataops-managed` 删掉才验证通的）。原因：只要 overlay 里还有该 `id` 的 `config:` 块，组合结果与写入内容就仍不等。
+3. **往 profile 里补一个 `cordis.patch.yml` 也没用**，只要 overlay 还压着同一个键。
+4. **改 overlay 文件后必须重启** `dataops-dsh-service`，而且**要等** —— 路由会先 404 或 500，约 10–60s 后才 200（见 §28）。我一开始把 500 当成新 bug，其实是后端 `http://host.docker.internal:3101` 当时整个不可达（宿主上也是 000）。
+
+### 29.1 顺手挖出的两个独立故障
+
+**(a) 孤儿锁文件把设置写入全堵死。** 编辑器写入前会取 `<profile>/package.json.lock`（`wx` 创建，内容为 pid）。若持锁进程变成**僵尸**，文件没人删：
+
+```
+atomic-write: timed out waiting for the writer lock at .../package.json.lock
+```
+
+诊断（照抄）：
+
+```bash
+C=dataops-ai-admin-dsh-runtime
+docker exec $C bash -lc "cat /workspace/.dataops/dsh/profiles/dataops-web/package.json.lock; awk '{print \$3}' /proc/<pid>/stat"   # Z = 僵尸
+docker exec $C bash -lc "for p in \$(ls /proc | grep -E '^[0-9]+$'); do ls -l /proc/\$p/fd 2>/dev/null | grep -q 'package.json.lock' && echo \$p; done"   # 空 = 没人持有
+docker exec $C bash -lc "rm -f /workspace/.dataops/dsh/profiles/dataops-web/package.json.lock"   # 运维动作
+```
+
+DSH 的契约**故意不自动清理**：「file age cannot prove that its owner stopped; orphan recovery is an operator action」。所以**看到这行报错，先 `rm` 锁**，再谈别的。
+
+**(b) `-32001 Request timed out` = DSH 侧 MCP 客户端超时，不是 DataOps 超时。** 报错来自 MCP SDK `protocol.js`：
+
+```js
+const timeoutHandler = () => cancel(McpError.fromError(ErrorCode.RequestTimeout, 'Request timed out', { timeout }));
+```
+
+`ErrorCode.RequestTimeout = -32001`。`timeout` 由 `packages/plus/mcp-credentials/src/tools.ts` 传入：
+
+```js
+client.request({ method: 'tools/call', ... }, schema, { signal: exec.signal, timeout: opts.toolCallTimeoutMs })
+```
+
+即 **`toolCallTimeoutMs`**。链路上的默认值：
+
+| 位置 | 值 |
+|---|---|
+| 插件最初默认（`01ed3cf`） | **120_000 = 2 分钟** |
+| 镜像 overlay（改之前） | 120000 → 300000 |
+| `@sparkelf/dsh-dataops-managed` 现默认 | 300_000 |
+| DSH MCP 客户端未设时 | 60_000 |
+| MCP SDK 兜底 | 60_000 |
+
+**这个旋钮只管 DataOps 的 8 个 MCP 工具**（`McpClient` 全插件只挂载一次，端点 `/api/ai/data-query/mcp`）：`search_resources` / `list_resources` / `describe_resource` / `search_query_guidance` / `execute_sql` / `call_data_api` / `read_query_result` / `export_query_result`。**不是「所有工具」** —— 面板标签若写成「工具调用超时」会误导，应为「DataOps 查询超时」。
+
+DataOps 后端在 MCP 查询路径上**没有 2 分钟常量**（`ai-data-query-mcp.service.ts` / `ai-dsh-embedded-data-query.service.ts` / `ai-mcp.service.ts` 里 `120000` 计数均为 0）。服务端真实上限是另一组：PostgreSQL 客户端默认 `statement_timeout` **12000（12 秒！）**（`execute_sql` 调用时**不传** `queryTimeoutMs`，走的就是它）、SQL 数据源 5 分钟、API 资源 40 分钟、Workspace guidance 默认 60 秒。**「查一会儿就失败」优先怀疑那个 12 秒，而不是 2 分钟。**
+
