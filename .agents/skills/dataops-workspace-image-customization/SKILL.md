@@ -1149,3 +1149,46 @@ pnpm run verify:plus-governance && pnpm run verify:standalone-manifest && pnpm r
 
 最后走 `release:ship` 发版，再把 `infra/docker-workspace/Dockerfile` 的 `DSH_STANDALONE_VERSION` 提到新版本重建 —— **pin 改了但没发版，工作区拿到的还是旧插件。**
 
+---
+
+## 27. 官方包的修复进不了工作区 —— 除非重新发一个上游版本
+
+**症状**：权限选择器里「完全权限」是中文，「Auto review」是英文（中文环境），图标也缺一个。
+
+**判据**：先确认是**键缺失**而不是翻译没加载 —— 打开下拉框看渲染出来的字：
+
+```bash
+# 出现在页面上的是「Auto review」，说明走的是 fallback，不是字典
+docker exec <companion> grep -o 'access\\.preset\\.[a-zA-Z]*' <profile>/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js | sort -u
+```
+
+修复在源码里（`ui-conversation/src/client/locales.ts` 加 `access.preset.auto`、`PermissionSelect.tsx` 加盾牌图标；`ui-permission-presets/src/client/presentation.ts` 加 `preset.auto`），**但装到工作区的是官方 npm 包，不是源码。**
+
+要让它生效有两条路，理解这两条才知道为什么这类改动特别贵：
+
+| 路径 | 做法 | 代价 |
+|---|---|---|
+| **重新发布官方包** | 打补丁 → 加进 `PATCHED_WORKSPACES` → 加 override → `release:republish-patched` | 必须先把补丁 rebase 到要发的那个版本上 |
+| **换上游版本** | 上游把修复发进新版本，bundle 的 override 提到新版本 | 等上游 |
+
+第二条路卡在一个**刻意设计的门禁**上（`package-patched-official.mjs` 的 `requireSourceVersion`）：
+
+```
+Error: --version 0.2.1-alpha.2 but the source declares 0.1.6-alpha.1 at
+packages/bundle/web-app; rebase the patches onto the 0.2.1-alpha.2 tree first
+```
+
+**这不是可以绕过的报错，是这个命令的正确行为**：重发布是把某个 checkout 的构建产物按一个新版本号发出去，如果那个 checkout 不是这个版本，就发出一个「声称自己来自某次发布、实际不是」的包。所以 `--version` 只允许等于 `packages/bundle/web-app/package.json` 里已经写的版本。
+
+本次实测的结论：`dsh-v0.2.1-alpha.1` 这个 tag 的 web-app 正好是 `0.2.1-alpha.1`（也就是 override 需要的版本），但 **tag 时间 2026-10-03 早于修复 2026-10-08**，所以那个 tag 的树里没有修复 —— 两个条件无法同时满足。
+
+**所以动手前先算这道题**：
+
+```bash
+git log -1 --format='%ad' --date=short <修复 commit>        # 修复何时发生
+git rev-parse <目标版本 tag>                                 # 版本对应哪个 checkout
+git merge-base --is-ancestor <修复 commit> <tag> && echo YES || echo NO   # 能否共存
+```
+
+**YES 才继续**；NO 就只有等上游发版，或者先 rebase 全部 23 个补丁到新版本树上（那是另一个量级的工程）。不要用「改小 `PACKAGED_FILES`」「跳过校验」之类的办法硬发 —— 那正是这类静默失效的来源。
+
