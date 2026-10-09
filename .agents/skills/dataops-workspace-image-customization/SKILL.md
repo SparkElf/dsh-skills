@@ -1194,20 +1194,43 @@ git merge-base --is-ancestor <修复 commit> <tag> && echo YES || echo NO   # �
 
 ---
 
-## 28. 换镜像后所有插件路由 404 —— 先清 `.dsh-market`
+## 28. 换镜像后所有插件路由 404 —— **先等，再查**（`ready:true` 不代表插件已挂载）
 
-**症状**：新镜像、profile marker 与模板**完全一致**、插件版本**正确**、`dataops-managed` 能独立 `import`、启动日志里**没有任何报错** —— 但五个路由全 404，连 `_dataops/session` 也 404。`dataops-dsh-service status` 报 `ready:true`。
+**症状**：刚换完镜像，五个路由全 404，连 `_dataops/session` 也 404 —— 但 `dataops-dsh-service status` 已经报 `ready:true`。
 
-**判据**：404 分两种，先分清是「插件没注册」还是「服务器根本没有这个 app」：
+**根因**：`web_ready()` 只 `GET /` 看是否返回 2xx/3xx：
 
-```bash
-# 服务器在，说明不是进程问题
-docker exec <companion> curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/      # 200
-# 插件路由 404，且连 plus 的路由也 404 = 一片都没注册
-docker exec <companion> curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/integrations/plus-backup/status
+```python
+# DSH先监听socket再挂载Web路由；仅根页面成功才报告Web ready。   ← 源码里的注释就写了这件事
+def web_ready():
+    connection.request("GET", "/", ...)
+    return 200 <= response.status < 400
 ```
 
-**根因**：profile 目录在**持久卷**里，模板里没有 `.dsh-market/`（那是 dshmarket 自己写的运行时目录）。marker 变了触发 `copytree`，但它是**覆盖式复制，不删除**模板里没有的文件 —— 于是上一轮留下的 `.dsh-market/hot-*.yml`（含 `mkt-client--*` 热挂载条目）跟着新 profile 一起启动，其中一条与正式条目冲突：
+**socket 先监听、插件树后挂载**，所以根页面能出 HTML 时，插件路由还没注册。实测轮询：
+
+```
++0s  ready=true  route=404
++4s  ready=true  route=200
+```
+
+**`ready:true` 与「路由可用」之间有几秒到十几秒的窗口。** 换镜像后立刻探路由，几乎必然拿到全 404。
+
+**正确做法**：轮询到 200，而不是探一次就下结论：
+
+```bash
+C=dataops-ai-admin-dsh-runtime
+for i in $(seq 1 30); do
+  code=$(docker exec $C bash -lc "curl -s -o /dev/null -w '%{http_code}' --max-time 8 \
+    http://127.0.0.1:3080/integrations/dataops/tool-timeout")
+  [ "$code" = "200" ] && { echo "routes up"; break; }
+  sleep 5
+done
+```
+
+**这次差点写成错的结论**：我先把原因归给持久卷里的 `.dsh-market` 残留（因为挪走它之后路由就好了）。**反向验证推翻了它** —— 把那个目录原样放回去再重启，路由**照样 200**。真正的变量只是「多等了一会儿」。
+
+**还看到过一条真的能让整个插件树停住的错误**（与本节症状相同、原因不同）：
 
 ```
 Error: command "export" is already registered
@@ -1215,23 +1238,13 @@ Error: command "export" is already registered
 dsh: warning: 1 entry did not activate
 ```
 
-一条 entry 没激活，整棵插件树就没走完，所有后续路由都不注册。**报错行在几万行日志的中间，`tail` 看不到。**
-
-**修法**（按顺序）：
+**一条 entry 没激活，后续路由就都不注册。** 这行在几万行日志的中间，`tail` 看不到 —— 所以插件路由异常时，要按「启动」分段去 grep：
 
 ```bash
 C=dataops-ai-admin-dsh-runtime
-P=/workspace/.dataops/dsh/profiles/dataops-web
-# 1. 先看它是不是残留（模板里有没有）
-docker run --rm --entrypoint bash dataops-ai-workspace:local -lc \
-  'ls -d /opt/dataops-dsh-profile-template/.dsh-market 2>/dev/null || echo "not in template"'
-# 2. 挪走（不要 rm，留着对比）
-docker exec $C bash -lc "mv $P/.dsh-market $P/.dsh-market.stale-\$(date +%s)"
-# 3. 重启，再验路由
-docker exec $C dataops-dsh-service stop && docker exec $C dataops-dsh-service ensure
+L=$(docker exec $C bash -lc 'grep -n "starting node" /workspace/.dataops/dsh/logs/web.log | tail -1 | cut -d: -f1')
+docker exec $C bash -lc "sed -n '$L,\$p' /workspace/.dataops/dsh/logs/web.log | grep -E 'did not activate|already registered|Error'"
 ```
 
-这次实测：挪走后**五个路由同时恢复**（`managed-auth 405` / `model-sync 200` / `skill-plaza 200` / `workspace-limits 200` / `tool-timeout 200`）。
-
-**下次排查顺序**：marker 一致 + 版本正确 + 无报错 = **不要再去查镜像**，去查持久卷里比模板多的东西。
+**排查顺序**：先轮询 30 秒确认不是等待窗口 → 再按启动分段 grep 服务端日志 → 最后才是怀疑镜像。
 
