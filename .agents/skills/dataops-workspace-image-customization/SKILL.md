@@ -1190,7 +1190,41 @@ git rev-parse <目标版本 tag>                                 # 版本对应�
 git merge-base --is-ancestor <修复 commit> <tag> && echo YES || echo NO   # 能否共存
 ```
 
-**YES 才继续**；NO 就只有等上游发版，或者先 rebase 全部 23 个补丁到新版本树上（那是另一个量级的工程）。不要用「改小 `PACKAGED_FILES`」「跳过校验」之类的办法硬发 —— 那正是这类静默失效的来源。
+**YES 才继续**；NO 就只有等上游发版，或者先 rebase 全部 23 个补丁到新版本树上（那是另一个量级的工程）。
+
+### 还有第三条路：**给已发布的包打 npm 补丁**（本次实测走通）
+
+重发布被门禁挡住 ≠ 没法修。**npm-target 的补丁包不经过重发布**，它和 better-sidebar 那四个补丁是同一条路：镜像里的 `materialize-npm-patches.mjs` 把 `patchedDependencies` 写进 profile，pnpm 在 install 时把补丁打上去。
+
+**关键：key 必须用「拥有字节的那个名字」，也就是 alias，不是 profile 里声明的名字。**
+
+profile 的 override 是 `npm:@sparkelf/dsh-client-ui-permission-presets@0.2.1-alpha.1`，目录名却是 `@deepseek-ai/dsh-client-ui-permission-presets`。四种写法实测：
+
+| key | 结果 |
+|---|---|
+| `@deepseek-ai/...@0.2.1-alpha.1` | `ERR_PNPM_UNUSED_PATCH` — 没有包叫这个名字 |
+| `@sparkelf/...@0.2.1-alpha.1` | **通过**，patch 打上了 |
+| `@sparkelf/...@0.2.1-alpha.1` + 无 `diff --git` 头 | `ERR_PNPM_INVALID_PATCH: no valid patches found` |
+| `@deepseek-ai/...@npm:@sparkelf/...` | `ERR_PNPM_PATCH_NON_SEMVER_RANGE` |
+
+**补丁文件格式**（少一样就 INVALID_PATCH）：必须有 `diff --git a/... b/...` 头行，`---`/`+++ ` 后**不能带时间戳**：
+
+```
+diff --git a/lib/client.js b/lib/client.js
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -164,6 +164,7 @@
+```
+
+用 `diff -u` 生成后要补第一行、并 `sed` 掉时间戳，否则 pnpm 直接拒收。
+
+**三条配套改动**（缺一个 gate 就红）：
+
+1. 补丁包的 `target.range` **必须有上界** —— `verify:plus-governance` 要 `exact or upper-bounded`，`>=0.1.7-rc.2` 会被拒，写 `>=0.1.7-rc.2 <0.3.0`。
+2. 目标包必须**被发行版拥有**（`ownsRuntimePackage`）：要么在 `dependencies`，要么在 `dshPlus.profile.dependencies`。放到 `profile.dependencies` 时**顺序也要对** —— 那个 gate 用 `JSON.stringify` 比较，是顺序敏感的，新条目要加在**期望列表的同一位置**。
+3. `.agents/plugins/curated.yaml` 要给它一条 entry + `localPatches`（带 `retireWhen`），否则 `curation must own upstream retirement` 失败。
+
+**不要用「改小 `PACKAGED_FILES`」「跳过校验」之类的办法硬发** —— 那正是这类静默失效的来源。
 
 ---
 
