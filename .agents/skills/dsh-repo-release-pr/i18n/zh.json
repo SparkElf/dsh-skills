@@ -1,0 +1,10 @@
+{
+  "_meta": {
+    "sourceHash": "f0d73a8f4d37d717e4cbd47c5f41e87665fa2143",
+    "model": "deepseek-v4.1-flash",
+    "translatedAt": "2026-10-15T16:40:09.295Z"
+  },
+  "title": "仓库发布与 PR 流程",
+  "description": "在 SparkElf/deepseek-harness-plus 自有仓库里发布 npm、开 PR、合并到 master 时使用。覆盖 master 服务端保护规则、加权批准机制、作者不能自批的原因，以及 release:ship 的步骤顺序。排查 push 被拒、PR 卡在 REVIEW_REQUIRED、不知谁来批准时优先读。",
+  "summary": "说明 DSH Plus 自有仓库的发布与 PR 规则：master 保护与必需状态检查、加权批准阈值 2 分且作者不计分、release:ship 的固定步骤与本地发布验证，并给出发布后打 tag、清理分支、worktree 与部署推进工具等踩坑与排查方法。"
+}

@@ -1,0 +1,10 @@
+{
+  "_meta": {
+    "sourceHash": "700dd4cec6c884c0ca0e87d5bb5ffe499d8df84e",
+    "model": "deepseek-v4.1-flash",
+    "translatedAt": "2026-10-15T16:40:36.118Z"
+  },
+  "title": "产品设计",
+  "description": "需求澄清、交互定义与验收标准；工作流第一阶段。",
+  "summary": "工作流第一阶段技能：澄清需求，定义交互、状态变化与验收标准，产出 PRD。约束测试口径、断线恢复、移动端范围与原型复现验收，并列反模式。"
+}

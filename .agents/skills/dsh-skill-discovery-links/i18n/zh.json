@@ -1,0 +1,10 @@
+{
+  "_meta": {
+    "sourceHash": "aa3a0e0cb6b7d213dcdf1b0fbc778f04e4cd1503",
+    "model": "deepseek-v4.1-flash",
+    "translatedAt": "2026-10-15T16:40:12.283Z"
+  },
+  "title": "技能发现路径配置",
+  "description": "当技能中心的技能不显示、想让某目录（如仓库自带的 .agents/skills）技能被自动发现、或需新增/迁移技能目录时使用。讲清 6 类扫描根、仓库自带技能默认不可见的原因、为何不该用 customSkillDirs 改 profile，以及幂等同步脚本的用法。",
+  "summary": "说明技能中心只扫描 bundled、project-dsh、project-agents、custom、user-dsh、user-agents 六类根目录，且工作区根取自注册表而非 cwd，故子目录技能不可见；给出技能合规自检、用软链接替代修改 profile 的做法、同步脚本参数与冲突策略、cron 自动化、端到端验证及反面清单。"
+}

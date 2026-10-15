@@ -1,0 +1,10 @@
+{
+  "_meta": {
+    "sourceHash": "966fb7f97713d424ec275f561653f06fdfbe1543",
+    "model": "deepseek-v4.1-flash",
+    "translatedAt": "2026-10-15T16:39:26.129Z"
+  },
+  "title": "色度键抠图",
+  "description": "用户要求从本地位图去除绿幕或色度键背景、生成透明 PNG 抠图、校验 alpha 边缘，或对 UI／游戏／美术素材批量重复同一抠图流程时使用。",
+  "summary": "用本地脚本从绿幕素材生成带 alpha 的 PNG 抠图：采样或指定键色、选择 strict 或 connected 模式、输出深色预览做质检，并校验 RGBA 与角点 alpha。含命令示例、质量规则与依赖。"
+}

@@ -1,0 +1,10 @@
+{
+  "_meta": {
+    "sourceHash": "ac401ed63774bc9fac7882386d1c0aee1930724a",
+    "model": "deepseek-v4.1-flash",
+    "translatedAt": "2026-10-15T16:40:17.633Z"
+  },
+  "title": "DSH 服务重启与配置",
+  "description": "重启 DSH/Plus Web 服务（3080），或在部署中改配置、换插件、动环境变量时使用。区分 supervisor 重启与 systemctl restart、何时必须重建单元、$DSH_HOME/.env 原生加载、会话内重启如何不自杀；排查重启后连不上、配置不生效、端口被占时优先读。",
+  "summary": "讲清 DSH/Plus Web 服务的重启与配置生效：默认走 supervisor 重启只回收 web 子进程，仅在 supervisor 自身环境或 profile 依赖变化时才需 --unit 重建单元；$DSH_HOME/.env 由 harness 原生分层加载，不能靠进程 env 判断是否生效；会话内重启需脱离 cgroup 并靠可观测事实判定健康；还涵盖端口归属排查与换插件/搜索后端的完整流程。"
+}

@@ -1,0 +1,10 @@
+{
+  "_meta": {
+    "sourceHash": "8a2dd9af31ee9f48d836a87df68e1904204b70d2",
+    "model": "deepseek-v4.1-flash",
+    "translatedAt": "2026-10-15T16:40:42.105Z"
+  },
+  "title": "测试治理",
+  "description": "治理正常功能开发后的 Playwright UI 系统测试，以及测试脚本、fixture/SDK、CI 门禁和既有测试清理。系统测试只经 UI 操作完成真实前后端联调。",
+  "summary": "规范系统测试：仅用 Playwright 经真实 UI 验证前后端与开发库；禁 mock、smoke、防御式测试与临时库；定义测试价值门禁、fixture/异常日志合同、并行与集中测试节奏。"
+}

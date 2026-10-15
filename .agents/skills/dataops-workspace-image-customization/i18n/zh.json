@@ -1,0 +1,10 @@
+{
+  "_meta": {
+    "sourceHash": "2102c513b483c22ebdfbab11a8a50d4e7131b4b4",
+    "model": "deepseek-v4.1-flash",
+    "translatedAt": "2026-10-15T16:39:31.554Z"
+  },
+  "title": "DataOps 工作区镜像定制",
+  "description": "改 DataOps 工作区镜像（dataops/infra/docker-workspace/）或工作区内 DSH 插件时使用：隐藏弹窗、关闭 onboarding、改插件配置、换 standalone 版本、调 profile 内容，排查插件路由 404、设置面板消失、重连接中、HTML 预览打不开。",
+  "summary": "讲清改 DSH 行为该落哪一层（profile 配置、overlay patch、官方 Config、重打包）、重启 DSH 的正规命令、3080 端口判据、apply() 注册顺序、volatile 配置与 npm 补丁失效原因，以及一整类静默失效的坑。"
+}
