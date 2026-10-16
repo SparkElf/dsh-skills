@@ -157,6 +157,46 @@ bump 脚本自己会打印这一行，注意读它的输出。
   git branch __restore_test <tag> && git branch -D __restore_test   # 证明可恢复
   ```
 
+## 6.1 提升前必须已经合并到 master（本次实测踩坑）
+
+镜像构建读的是 `PLUS_REPO`，默认就是 **当前工作树**：
+
+```sh
+# /root/.dsh/dsh-plus-mirror:50
+PLUS_REPO=${PLUS_REPO:-/root/projects/deepseek-harness-plus}
+```
+
+所以在**未合并的分支**上建镜像、再切 3080，等于把没经过 master 门禁的产物推上生产。2026-10-10
+实测：镜像建在 `fix/alpha2-substitution-set`（未合并），3080 切换后页面白屏，报
+
+```
+client-modules: duplicate factory registration for
+  "@deepseek-ai/dsh-client-ui-permission-presets"
+```
+
+而当时 master 上的真实状态（overrides 里 5 个指向不存在的 npm 版本）被这一层掩盖了 ——
+**症状描述的是分支，不是发布版，所有诊断都对着错的产物**。
+
+正确顺序：
+
+1. 先 `git merge`（或 PR squash 合并）到 master；
+2. 从 master 建镜像；
+3. 再切 3080 / 更新工作区镜像 pin。
+
+判断「镜像建在哪个 revision」：
+
+```sh
+cd <mirror> && git log --oneline -1     # 应等于 origin/master 的 tip
+```
+
+## 6.2 一个 prunable worktree 会掩盖分支状态
+
+`git worktree list` 里标 `prunable` 的条目（gitdir 指向已删除的位置）不会自动消失，
+`git status` 也不会提示。`git worktree prune -v` 清理后，分支相对 master 的真实差异才呈现出来。
+
+本次有 3 个 prunable（`/tmp/revwt`、`/tmp/revwt2`、`/tmp/dsh-master-check`），
+另有 2 个真实 worktree（`/tmp/pre`、`/tmp/wt2`）保留着补丁生成用的 base。
+
 ---
 
 ## 7. 工作树（worktree）

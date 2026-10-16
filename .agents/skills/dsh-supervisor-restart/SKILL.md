@@ -5,6 +5,25 @@ description: 重启 DSH/Plus 的 Web 服务（3080）或在部署里改配置、
 
 # DSH / Plus 服务重启与配置生效
 
+> **红线：绝对不要在 `/root/.dsh/profiles/plus`（或任何 release 路径）里跑
+> `pnpm add` / `pnpm install` / `npm install`。**
+>
+> 它不是普通项目目录：`/root/.dsh/profiles/plus` 是符号链接，指向
+> `<release>/profiles/plus`。在那里跑包管理器会让 pnpm 按 profile 的
+> `package.json` 重算整个 workspace 图，删掉发行版预置的嵌套 `node_modules`
+> （包括 `apps/cli` 自己的，`commander` 随之消失 → **CLI 完全无法启动**），
+> 并把 41 个 `@deepseek-ai` 包从符号链接变成实体目录（duplicate packages 缺陷）。
+>
+> **最阴险的地方**：运行中的服务靠内存继续工作，HTTP 依旧 200，**看不出任何异常**；
+> 破坏只在**下一次重启**时暴露 —— `preflight` REFUSED，服务起不来。
+>
+> 2026-10-16 实际发生过，完整事故记录与修复步骤：
+> `/root/.dsh/PROFILE-PNPM-INCIDENT-20261016.md`
+>
+> 要挂/卸插件用能力开关（第 6 节）；真要动依赖图，改 specifier 后走
+> `dsh-3080-restart`（它的 preflight 会判定和修复）。
+
+
 这个技能解决一类反复出现的事故：**改了配置、重启了服务，但改动不生效，或者重启把承载会话的进程一起杀了。**
 
 核心结论先给：
@@ -172,6 +191,28 @@ DataOps 工作区的 DSH 跑在 companion 容器里，命令行同样是 `--port
 
 ## 6. 改插件 / 换搜索后端的完整流程
 
+> **能力开关优先用 dsh-plus 自己的命令**，它只编辑 patch 里它拥有的行，
+> 不碰依赖图、不动 node_modules：
+>
+> ```bash
+> cd /root/.dsh/profiles/plus
+> DSH_HOME=/root/.dsh node node_modules/@sparkelf/dsh-plus/lib/bin.js capabilities --json    # 只读
+> DSH_HOME=/root/.dsh node node_modules/@sparkelf/dsh-plus/lib/bin.js doctor                 # 只读诊断
+> DSH_HOME=/root/.dsh node node_modules/@sparkelf/dsh-plus/lib/bin.js capabilities --enable exa,officecli
+> ```
+>
+> `doctor` 会报一类静默不一致：**`capabilities.json` 记录已启用，但 profile 的
+> `cordis.patch.yml` 里没有对应挂载行** —— 插件根本没挂上。判据是
+> `FAIL capabilities disagree with capabilities.json: <ids>`。
+> 2026-10-16 实测：`exa` 处于这个状态，所以 web 搜索一直走内置 DeepSeek 后端。
+>
+> 还要注意**插件版本与 release 的 peer 兼容**：`dsh-web-search-exa@0.1.6-alpha.2`
+> 要求 peer `dsh-web ^0.1.6-alpha.2`，而 release 的 `dsh-web` 是 `0.2.1-alpha.2`，
+> `^` 与 `>=` 在预发布版规则下都不匹配 → `apply()` 永不执行，provider 永不注册
+> （报错是 "configured web provider ... is not registered"）。把 specifier 钉到与
+> release 同源的版本（`0.2.1-alpha.2`，其 peer 是 `workspace:*`）才能解决。
+
+
 以「把 web_search 从 A 后端换到 B 后端」为例（A 挂 B 本地的常见场景）：
 
 ```bash
@@ -292,3 +333,30 @@ systemctl is-active deepseek-harness-plus.service &&
 - ❌ 用 `nohup`/`setsid` 让验证脚本活过一次重启 —— 不脱离 cgroup，照样被杀。
 - ❌ 用裸 `FAILED` 匹配重启日志 —— supervisor 的 `"failed":0` 会假阳性。
 - ❌ 装了两个同类 provider 却没配 selector —— 直接 `AMBIGUOUS`。
+- ❌ **在 profile 或 release 里跑 `pnpm/npm add|install|remove|update`** —— 会拆掉发行版的嵌套链接，服务当时还活着，重启才炸。
+- ❌ 用「服务还返回 200」证明系统健康 —— 内存里的服务不代表能重启；必须跑 `preflight-start.mjs`。
+- ❌ 相信 `check-profile-scope.mjs` / `repair-profile-scope.mjs` 的默认 profile 路径 —— 它们默认 `<release>/profile`（不存在），真实路径是 `<release>/profiles/plus`。**不显式传 `--profile` 会读到空 scope 并报 `healthy: true`（假阴性）**。
+- ❌ 只给 `dsh-3080-restart` 看退出码 —— 真实原因在 `/root/.dsh/dsh-3080-restart.log`。
+
+## 11. 改完 profile 后的验证判据（缺一不可）
+
+```bash
+REL=/root/.dsh/releases/plus/plus-021a2-final
+PROFILE=$REL/profiles/plus          # ← 必须显式传
+
+# 1. 依赖图健康（权威）
+node /root/.dsh/supervisor/check-profile-scope.mjs --release $REL --profile $PROFILE --json \
+  | grep -o '"healthy":true'
+
+# 2. CLI 能起来（2026-10-16 就是在这一步翻车的）
+node $REL/apps/cli/lib/bin.js --help >/dev/null && echo CLI_OK
+
+# 3. 闸门通过（它已内置 package-manager trace 检查）
+node /root/.dsh/supervisor/preflight-start.mjs 2>&1 | grep -q passed && echo PREFLIGHT_OK
+
+# 4. 重启后 pid 真的变了，且 HTTP 200
+dsh-3080-restart
+ss -lptnH 'sport = :3080'
+
+# 5. 功能真的可用（唯一最终判据）—— 例：实跑一次 web_search
+```
