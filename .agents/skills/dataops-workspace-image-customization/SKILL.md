@@ -1496,3 +1496,936 @@ timeout 120 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\Windows\
 
 资源占用合计约 **432 MiB**（gateway 17.7 / frontend 13.8 / backend 395 / redis 5.4），镜像 2.34 GB。
 
+
+### 27.1 补丁目标的 **profile dependency 要声明「重发布名」，不是官方名**（我漏掉的一步）
+
+§27 讲了「给已发布的包打 npm 补丁」这条路，但**漏了最关键的一步**：`dshPlus.profile.dependencies` 里
+该写哪个名字。我按官方名写，结果 **`pnpm run constraints` 直接红**：
+
+```
+@sparkelf/dsh-plus-standalone: dependencies.@deepseek-ai/dsh-client-ui-permission-presets
+  must use the workspace: protocol, got npm:@sparkelf/dsh-client-ui-permission-presets@0.2.1-alpha.1
+```
+
+**为什么**：`@deepseek-ai/dsh-client-ui-permission-presets` 在本仓库里**是 workspace member**
+（`packages/client/ui-permission-presets`）。`checkWorkspaceProtocol` 要求：凡是引用 workspace member
+的依赖，都必须是 `workspace:` 协议。而 profile 依赖会被生成器**原样搬进 standalone 的
+`dependencies`**，于是 `npm:` 别名触发这条规则。
+
+**两个门禁互相咬住**，所以两个"显然"的解法都不行：
+
+| 尝试 | 结果 |
+|---|---|
+| 按官方名声明 profile dependency（`npm:@sparkelf/...`） | ✗ constraints：workspace member 必须用 `workspace:` |
+| 干脆不声明，只留 `profile.overrides` | ✗ governance：`dshPlus.profile.dependencies must own the exact reviewed production bundle set` |
+
+**正确形状**：profile dependency 声明 **重发布的那个名字**（`@sparkelf/...`）—— 它**不是** workspace
+member，所以不受协议规则约束；官方名继续留在 `overrides` 里做别名。两边的键自然就都是
+`@sparkelf/...`，和 §27 讲的 pnpm 补丁 key 完全一致：
+
+```jsonc
+// packages/bundle/plus/package.json
+"dshPlus": { "profile": {
+  "dependencies": {
+    "@sparkelf/dsh-client-ui-permission-presets": "0.2.1-alpha.1"   // 重发布名，不是官方名
+  },
+  "overrides": {
+    "@deepseek-ai/dsh-client-ui-permission-presets": "npm:@sparkelf/dsh-client-ui-permission-presets@0.2.1-alpha.1"
+  }
+}}
+```
+
+补丁包的 `target.name` 也改成重发布名（`@sparkelf/dsh-client-ui-permission-presets`），
+这样 materializer 生成的 key 与 pnpm 接受的 key 天然对齐。
+
+**配套**：`scripts/verify-plus-governance.ts` 里那份 `expectedProfileDependencies` 字面量也要同步改名。
+
+### 27.2 本机 `minimumReleaseAge: 0` 会**掩盖** CI 的发布年龄检查
+
+本机 `/root/.config/pnpm/config.yaml` 里写着 `minimumReleaseAge: 0`，于是本地
+`pnpm install --frozen-lockfile` 永远通过，而 CI 用 pnpm 默认值（1440 分钟）就红：
+
+```
+[ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION] @sparkelf/dsh-dataops-managed@0.3.17 发布于 ...,
+在 minimumReleaseAge 窗口内
+```
+
+**复现 CI 判据**（必须这样测，否则本地永远绿）：
+
+```bash
+PNPM_CONFIG_MINIMUM_RELEASE_AGE=1440 pnpm install --frozen-lockfile
+```
+
+修法是往 `pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude` 加**精确版本**条目
+（`- '@sparkelf/dsh-dataops-managed@0.3.17'`），这是仓库既有约定；`ship.ts` 的
+`addReleaseAgeExemptions()` 本会自动追加，但本次 0.3.17 的 pin 发生在 release 之后，所以没被带上。
+**不要动 `minimumReleaseAge` 本身**。
+
+> 一般教训：**本地通过 ≠ CI 通过**，只要本地有任何 `config.yaml` 覆盖了策略默认值。
+> 判断依据要取 CI 的实际判据，而不是本机跑通。
+
+
+## 31. 内网 IP 环境模拟与「重新连接中」排错（用非 localhost 的 IP 验证）
+
+浏览器必须用**非本地 IP** 验收，才能复现内网真实环境；而本机又连不通真实内网地址。
+本节就是在单机上造出那个条件，以及配套的四条判据。
+
+### 31.1 用**非 localhost 的 IP** 验证内网效果：本机造一个 dummy 网卡承载那个地址
+
+用户要求「必须用 IP 访问，不能用 localhost/127.0.0.1，才能模拟内网真实环境」。本机去连
+真实内网 IP（如 `71.30.81.131`）是**连不通的**（那在外网）。正确做法是**让本机真的拥有
+那个地址**，从而命中与内网一致的同源判定：
+
+```bash
+# 仓库已固化脚本：scripts/simulate-intranet-ip.sh
+sudo bash scripts/simulate-intranet-ip.sh add 71.30.81.131
+```
+
+然后把它设成入口 origin 并重启集群：
+
+```bash
+# /tmp/dataops-cluster.env
+DATAOPS_PUBLIC_APP_ORIGIN=http://71.30.81.131:8080
+bash scripts/start-local-cluster.sh stop  --name dataops --work-dir <work-dir>
+bash scripts/start-local-cluster.sh start --port 8080 --env <env> ... \
+  --dsh-port-start 32000 --dsh-port-end 32100
+```
+
+**为什么 dummy 接口能通，而访问自己的 eth0 地址不能通**：WSL 处于镜像网络模式，容器把端口
+发布在 `0.0.0.0`。访问 **dummy 接口**上的地址时，内核判定为本机地址，直接命中监听 socket，
+**不走 DNAT**；而访问 eth0 自己的地址会被 iptables DNAT 改写，回程被 RST（表现为 `000`
+/`Connection reset by peer`，同时 nginx 那边却记 200）。这就是 §30 里那条「不能用自己网卡
+IP」的例外条件 —— **只有 dummy/额外地址能绕开它**。
+
+**验证结果（实测）**：`http://71.30.81.131:8080/ai/dsh` 在真实浏览器里完整渲染工作台，
+iframe 挂上 `http://71.30.81.131:32008/`，而**关键证据**是这条：
+
+```
+204 POST http://71.30.81.131:32008/integrations/dataops/managed-auth
+```
+
+它当初返回 **405** 正是「重新连接中」的根因；现在 204 且页面无「重新连接中」。
+
+### 31.2 `DATAOPS_PUBLIC_APP_ORIGIN` 必须填**浏览器实际用的那个 hostname**
+
+`resolveBrowserEntryOrigin()`（`backend/src/server/public-app-origin.ts`）的逻辑是：
+**浏览器请求的 hostname 必须在 `DATAOPS_PUBLIC_APP_ORIGIN` 列表里**，否则回落到列表第一项。
+而 `targetOriginBrowserRequest()`（`ai-workspace-web-gateway.service.ts:153`）要求 iframe 的
+`Origin` 与 targetOrigin **完全相等**，否则 **403 且页面「重新连接中」**。
+
+判定顺序（读源码确认，不是猜的）：
+
+| 条件 | 结果 |
+|---|---|
+| `Sec-Fetch-Site: same-origin` / `same-site` | 放行 |
+| `Sec-Fetch-Site: cross-site` | **拒绝（403）** |
+| 无 Fetch Metadata 但 GET/HEAD 且带该 target 的 HttpOnly cookie | 放行 |
+| `Origin` 头 === targetOrigin | 放行 |
+
+**踩过的坑**：我先把 origin 设成 `10.49.161.105`（WSL 内部接口），从 Windows 侧**根本不可达**，
+于是浏览器用别的地址访问 → 永远不匹配 → **403 → 「重新连接中」**。
+
+**判据（必须两侧都测）**：
+```bash
+# WSL 侧
+curl -s -o /dev/null -w '%{http_code}\n' http://<IP>:8080/api/health
+# Windows 侧（浏览器真实视角）
+powershell.exe -NoProfile -File 'C:\Windows\Temp\x.ps1'   # 里面 Invoke-WebRequest
+```
+只有 **Windows 侧可达**的地址才是能写进 `DATAOPS_PUBLIC_APP_ORIGIN` 的地址。
+
+**注意**：`start-local-cluster.sh` 的校验只接受**单个** origin（`^https?://[^/]+$`），
+但**后端本身支持逗号分隔的多个**（`resolveDataopsPublicAppOrigins()` 按 `,` 切分）。
+用脚本部署时只能填一个；要支持多入口得绕过脚本校验。
+
+**排错开关**：这个拒绝会在后端日志里留下
+`event: ai.workspace_web_gateway.browser_provenance_rejected`。**判据**：
+`docker logs dataops-backend-1 | grep -c browser_provenance_rejected` → 0 表示 origin 已对上。
+
+### 31.3 工作区容器会**缓存旧 env**：改了 origin/端口必须重建容器
+
+工作区容器是在**旧配置**下创建的，它把 `DATAOPS_AI_WORKSPACE_BACKEND_BASE_URL` 固化在
+自己的环境里。旧开发模式（后端跑在宿主 3101）留下的是
+`http://host.docker.internal:3101`，而容器化后后端**不发布 3101**，于是工作区 agent 一直
+`connect ECONNREFUSED 172.17.0.1:3101`，前端拿到
+`WORKSPACE_WEB_GATEWAY_AGENT_OFFLINE`，页面「重新连接中」。
+
+**修法**：删掉工作区容器让它以当前配置重建（数据在卷上，删容器不丢，见 §30.4）：
+```bash
+docker rm -f dataops-ai-admin dataops-ai-admin-dsh-runtime
+# 再 POST /api/ai/workbench/dsh/ensure 触发重建
+```
+
+**判据（两条都要）**：
+```bash
+docker inspect dataops-ai-admin --format '{{range .Config.Env}}{{println .}}{{end}}' | grep BACKEND_BASE_URL
+#   -> 应为 http://host.docker.internal:<网关端口>（8080），不是 3101
+docker exec dataops-ai-admin sh -lc 'tail -60 /tmp/dataops-runtime-daemon.log | grep -c ECONNREFUSED'
+#   -> 0
+```
+`ensure` 返回里**出现 `targetOrigin` 就说明 agent 已连上**；返回
+`WORKSPACE_WEB_GATEWAY_AGENT_OFFLINE` 就是没连上。
+
+### 31.4 用浏览器验证「不是重新连接中」的正规流程
+
+工作区的登录页在部分部署下走 PKI 控件，脚本填表提交**不会**建立会话。可靠做法是
+**取 token 注入 sessionStorage**，键名是 `dataops_auth_token`（见
+`frontend/src/modules/auth/authService.ts`）：
+
+```js
+// Playwright（WSL 侧自带 chromium 可用；不要用 Windows Edge，CDP 跨边界不通）
+await context.addInitScript(t => {
+  window.sessionStorage.setItem('dataops_auth_token', t)
+  window.localStorage.setItem('dataops_auth_token', t)
+}, token)
+await page.goto('http://<IP>:8080/ai/dsh')
+```
+
+**登录接口的字段名是 `account` 不是 `username`**（`backend/src/auth/dto/login.dto.ts`），
+写错会 400 `property username should not exist`。
+
+**判据（截图 + 请求双证）**：
+- `page.frames()` 里出现 `http://<IP>:3200x/` —— iframe 真的挂上了
+- 请求列表里有 `204 POST .../integrations/dataops/managed-auth` 与
+  `204 POST .../_dataops/session`
+- `page.locator('body').innerText()` **不含**「重新连接」
+- `page.on('pageerror')` 无错误
+
+**不要用 `curl` 直接打 32008 判断成败**：工作区 origin 对裸请求返回 **401**（缺 JWT cookie）
+是**正确**响应，403 才是 origin 没对上。401 和 403 的区别就是「origin 通过 / 没通过」。
+
+
+## 32. 工作区镜像构建：`npmmirror` 的「元数据已到、tarball 未到」窗口
+
+**现象**：镜像构建在 `dsh-registry-install` 阶段失败，报
+
+```
+npm error code E404
+npm error 404 Not Found - GET https://cdn.npmmirror.com/packages/%40sparkelf/dsh-patch-auto-review-preset-label/0.2.1-alpha.20/....tgz
+npm error 404 '@sparkelf/dsh-patch-auto-review-preset-label@https://registry.npmmirror.com/...' is not in this registry.
+```
+
+**这极具误导性**：`npm view <pkg>@<ver> version` 会**成功**返回版本号（元数据已镜像），
+于是你以为包在镜像上；但 **CDN 的 tarball 还没同步**，实际下载 404。
+
+**根因**：`infra/docker-workspace/Dockerfile:26` 把 `NPM_CONFIG_REGISTRY` 默认成
+`https://registry.npmmirror.com`（`:35` 写进 `/root/.npmrc`）。这是个**最终一致**的镜像，
+刚发布的包会落在这个窗口里。
+
+**判据（必须分开测元数据与 tarball，不能只看 `npm view`）**：
+
+```bash
+P=@sparkelf/dsh-patch-auto-review-preset-label
+V=0.2.1-alpha.20
+# 1) 元数据（会骗你）
+npm view "$P@$V" version --registry https://registry.npmmirror.com
+# 2) tarball 直连（真相）：把 scope 与包名从 $P 里切出来
+PKG="${P#@sparkelf/}"
+curl -sL -o /dev/null -w "%{http_code}\n" --max-time 20 \
+  "https://cdn.npmmirror.com/packages/%40sparkelf/$PKG/$V/$PKG-$V.tgz"
+#    404 = 未同步；200 = 可用
+# 3) 对照 npmjs
+curl -sL -o /dev/null -w "%{http_code}\n" --max-time 20 \
+  "https://registry.npmjs.org/$P/-/$PKG-$V.tgz"
+```
+
+**处理**：**等一两分钟重跑**即可。本会话实测：首次构建 404 失败，约 5 分钟后同一命令成功
+（`added 1 package in 2s`），且装进去的 `version` 与补丁内容都正确。
+
+若确实需要绕过，用构建参数覆盖而不是改 Dockerfile 默认值：
+
+```bash
+node build-and-verify.mjs --image dataops-ai-workspace:local \
+  # 需要时给 --build-arg NPM_CONFIG_REGISTRY=https://registry.npmjs.org
+```
+
+**不要**因为一次 404 就去改 Dockerfile 的默认 registry —— 那是给受限网络准备的正规配置，
+偶发的同步窗口不该推翻它。**先确认是不是同步窗口**（上面第 2、3 条对比），再决定。
+
+> 一般教训：**`npm view` 通过 ≠ 包可安装**。元数据与 tarball 是两次独立的上游请求，
+> 镜像站点上二者的同步时机不同。判断「包到底能不能装」必须以 **tarball 的 HTTP 状态**为准，
+> 或直接做一次真实的 `npm install` 到临时目录。
+
+**本会话第 3 次遇到同类陷阱**（前两次：`dsh-jobs-local@0.2.1-alpha.2` 在镜像上缺失、
+`pnpm` 的 `minimumReleaseAge` 窗口）。共同点：**镜像侧的「看起来有」不等于真正可用**，
+判据必须取真正执行那一步的输出。
+
+## 33. 发行版版本错位：runtime 必须钉在「重发布集合」的版本上
+
+**症状**：镜像能构建出来，但**工作区里的 DSH 起不来**，`verify-workspace-image` 报
+
+```
+FAIL the service reports itself running and ready
+  DSH Web exited before readiness (exit code 1)
+```
+
+而 `dataops-dsh-service start` 的完整输出才是真相：
+
+```
+dsh: skipping profile bundle "@huanlin/dsh-plugin-better-locale": incompatible with dsh 0.2.1-alpha.2
+dsh: skipping profile bundle "dsh-sql-workbench":      incompatible with dsh 0.2.1-alpha.2
+dsh: disabling profile plugin row "auto-review":        incompatible with dsh 0.2.1-alpha.2
+dsh: startup failed: 1 required plugin did not activate
+  Failed plugins (2):  connection (required)
+    Error: cannot get property "webRuntime" without inject
+```
+
+**根因**：`compatibility.dsh` 是**范围地板**（`>=0.2.1-alpha.1`），不是确切版本。
+standalone 清单用 `workspace:>=0.2.1-alpha.1`，而 **prerelease 范围会接纳下一个 prerelease**；
+一旦官方发布 `0.2.1-alpha.2`，安装就解析到它。但发行版用 `overrides` 替换的那套
+**重发布包（`@sparkelf/*`）停在 `0.2.1-alpha.1`** —— 官方包之间用**精确 peer**互相校验，
+于是整套 profile 被拒。
+
+| 版本 | runtime | 重发布集合 | 结果 |
+|---|---|---|---|
+| alpha.19 | `0.2.1-alpha.1` | `0.2.1-alpha.1` | ✅ 一致 |
+| alpha.20 | `0.2.1-alpha.2` | `0.2.1-alpha.1` | ❌ 错位，DSH 拒绝启动 |
+
+alpha.19 没事**只是因为它发布时 alpha.2 还不存在**。
+
+**修法（已实现在 `assemble-registry-profile.mjs`）**：以**重发布集合的版本为锚点**，
+把 runtime 依赖钉回去。锚点不用猜 —— 发行版自己说了：52 条 override 里 **50 条**是同一个版本，
+取这个众数即可（兼容 `npm:` 别名与纯版本两种写法）：
+
+```js
+// 52 条里 50 条 = 0.2.1-alpha.1 -> 锚点
+const republishedVersion = /* overrides 的版本众数 */
+dependencies['@deepseek-ai/dsh'] = republishedVersion
+```
+
+**判据（必须两端都查）**：
+
+```bash
+# 镜像里 runtime 与重发布包的版本必须相等
+docker run --rm --entrypoint sh <img> -c \
+  'echo runtime=$(node -e "console.log(require(\"/opt/dsh-plus/node_modules/@deepseek-ai/dsh/package.json\").version)"); \
+   echo conn=$(node -e "console.log(require(\"/opt/dataops-dsh-profile-template/node_modules/@deepseek-ai/dsh-client-connection/package.json\").version)")'
+```
+
+**我踩过的错路**：反过来做——把 override **升到**已解析的 runtime 版本。
+那会让 profile 去指名重发布集合**从未发布过**的版本。实测 `@sparkelf/dsh-base`、
+`@sparkelf/dsh-api-gateway`、`@sparkelf/dsh-client-connection`、
+`@sparkelf/dsh-api-session-controller` **都没有 alpha.2**，只有 alpha.1。
+方向错了：**不是把替换集抬上去，而是把 runtime 压下来**。
+
+另外 `@deepseek-ai/dsh-invariants` 停在 `0.2.0-rc.2`，**不跟** runtime 走；
+任何"统一改写版本号"的批量操作都要排除它（21 个候选里只有它没有 alpha.2）。
+
+## 34. 复现工作区里 DSH 的启动失败
+
+`verify-workspace-image` 的输出被截断（`:300`），看不到真正原因。**完整复现**：
+
+```bash
+docker run -d --name svc-probe -e DATAOPS_DSH_RUNTIME_ROLE=managed-companion \
+  --entrypoint sh <img> -c "sleep 900"
+docker exec -e DATAOPS_DSH_RUNTIME_ROLE=managed-companion svc-probe \
+  sh -c "timeout 200 python3 /usr/local/bin/dataops-dsh-service start 2>&1 | head -30"
+```
+
+**两个坑**：
+1. **必须带 `DATAOPS_DSH_RUNTIME_ROLE=managed-companion`**，否则服务直接拒绝：
+   `DSH_RUNTIME_ROLE_INVALID: Managed DSH must run in the isolated DataOps companion container.`
+2. 直接跑 `node .../dsh/lib/bin.js --profile dataops-web` 会报
+   `profile "dataops-web" does not exist` —— 那是**假象**：服务会先把镜像里的模板
+   （`/opt/dataops-dsh-profile-template`）复制到 `/workspace/.dataops/dsh/profiles/`。
+   绕过服务直接跑就缺这一步。
+
+**最完整的错误在 `web.log`**：
+
+```bash
+docker exec svc-probe sh -c "tail -30 /workspace/.dataops/dsh/logs/web.log"
+```
+它给出被跳过的 bundle、被禁用的 row，以及 `Failed plugins` 的服务与原因。
+
+## 35. `install 树` 是陈旧依赖图，`registry` 才是「版本是否存在」的判据
+
+我用 install 树（`/opt/dsh-plus/node_modules/<pkg>/package.json`）来判断某个版本是否存在，
+结果**判定全错**：树里是 `dsh-agent@0.2.0-rc.2`，而 registry 上 `0.2.1-alpha.2` 明明存在。
+install 树装的是 standalone 闭包解析出来的图，它会**滞后**于 runtime 走到的版本。
+
+**判据**：
+
+```bash
+# 错的（陈旧）
+docker run --rm --entrypoint sh <img> -c 'node -e "console.log(require(\"/opt/dsh-plus/node_modules/@deepseek-ai/dsh-agent/package.json\").version)"'
+# 对的（权威）
+curl -sL https://registry.npmjs.org/@deepseek-ai%2Fdsh-agent/0.2.1-alpha.2 | head -c 100
+```
+
+构建阶段能访问 registry（实测容器内 `https.get` 返回 200），所以需要"版本是否存在"时直接查 registry。
+
+## 36. `alpha.19 能用` 是个**时间巧合**，不是它 pin 对了 —— 别把它当基准
+
+排查版本错位时最容易得出的错误结论：
+
+> "alpha.19 的 `verify-workspace-image` 全绿，所以照它那样配就对了。"
+
+**实测推翻**：把 alpha.19 镜像里的 profile 模板原样抽出来、**清掉 `node_modules` 重新 `pnpm install`**，
+今天的结果是 **303 个顶层包，`dsh` 解析到 `0.2.1-alpha.2`** —— 和"坏"的 alpha.20 一模一样。
+
+```bash
+# 抽模板
+docker run --rm --entrypoint sh dataops-ai-workspace:alpha19-backup -c \
+  "tar -C /opt -cf - dataops-dsh-profile-template" | tar -C /tmp/lab -xf -
+mv /tmp/lab/dataops-dsh-profile-template /tmp/lab/base
+# 清 node_modules 重装
+cd /tmp/lab/base && rm -rf node_modules pnpm-lock.yaml
+CI=true npx --yes pnpm@11.7.0 install --config.lockfile=false
+# -> 顶层包数 303（基线是 296），dsh-tool-cordis/agent-preset/attachment 全变 alpha.2
+```
+
+**为什么**：alpha.19 构建于 `2026-10-03`，那时 `0.2.1-alpha.2` **还没发布**（发布于 `2026-10-09T08:18Z`）。
+它的 `node_modules` 是**当时冻结下来的产物**，而不是配置导致的稳定结果。
+profile 里**没有 `pnpm-lock.yaml`**（实测两版镜像都 ABSENT），所以每次构建都是**全新解析**。
+
+**教训**：
+- 不要把"某个历史镜像通过验证"当作配置正确的证据 —— 先看那段依赖是否**当时就存在**。
+- 判断 pin 是否有效，要**清掉 node_modules 重装**再看，不能在已有树上追加安装。
+  > 我第一轮实验就是在旧树上装，结果三组结果被污染，白跑了两轮。
+
+## 37. 本地秒级实验替代 20 分钟整镜像构建
+
+`build-and-verify.mjs` 一次要 **10-20 分钟**，用它试错代价极高。**先本地做秒级实验**：
+
+```bash
+# 1. 抽模板（几秒）
+rm -rf /tmp/lab && mkdir -p /tmp/lab
+docker run --rm --entrypoint sh <img> -c "tar -C /opt -cf - dataops-dsh-profile-template" \
+  | tar -C /tmp/lab -xf -
+mv /tmp/lab/dataops-dsh-profile-template /tmp/lab/base
+
+# 2. 复制整份模板（必须带 .dsh-plus/patches，否则 pnpm 报 ENOENT）
+cp -a /tmp/lab/base /tmp/case && cd /tmp/case && rm -rf node_modules pnpm-lock.yaml
+
+# 3. 改配置后重装（约 10 秒）
+CI=true npx --yes pnpm@11.7.0 install --config.lockfile=false --reporter=append-only
+
+# 4. 看关键包的解析版本
+node -e "console.log(require('/tmp/case/node_modules/@deepseek-ai/dsh/package.json').version)"
+```
+
+**两个坑**：
+1. **必须复制整份模板**（含 `.dsh-plus/patches/`）。只复制 `package.json` + `pnpm-workspace.yaml` 会报
+   `ENOENT ... .dsh-plus/patches/combined/dsh-better-sidebar@0.24.1.patch`。
+2. **必须 `rm -rf node_modules pnpm-lock.yaml`**。在残留树上装会得到被污染的结论。
+   还要 `CI=true`，否则 pnpm 无 TTY 时拒绝清理 modules 目录（`ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY`）。
+
+## 38. 排查期别让 `local` 标签指向坏镜像
+
+工作区容器用的是 `dataops-ai-workspace:local`。调试时若把坏镜像留在 `local`，
+**任何一次工作区重建都会拿到坏镜像**。正规做法：
+
+```bash
+# 保留可用的那份，并让 local 指回它
+docker tag <已知良好ID> dataops-ai-workspace:local
+docker tag <已知良好ID> dataops-ai-workspace:known-good-alpha19
+# 把在试的坏镜像单独命名，别占用 local
+docker tag <坏ID> dataops-ai-workspace:alpha20-broken
+```
+
+另外整镜像构建会留下 `<none>` dangling 镜像，`docker images` 看不到它们，
+要用 `docker images -f dangling=true` 才能确认某个 ID 是否还在。
+
+## 39. `pnpm` 的 store 缓存**不能挂在 `PNPM_HOME` 下**（构建永远卡住）
+
+### 症状
+构建在 `dsh-registry-install` 的 `dsh plugin install` 那一步**永远不返回**：
+
+```
+wchan: do_epoll_wait          # 所有线程都在 epoll/futex
+CPU ticks delta = 0 over 20s  # 不计算
+0 个 TCP 连接                  # 不下载
+18 个 /pnpm/store/v11/index.db 句柄
+无输出、无报错 —— 看起来只是"慢"
+```
+
+### 误判（我犯过，别再犯）
+一开始归因于"两个 pnpm 并发写同一 store 互相锁死"。**实测推翻**：`ps | grep pnpm` 全程
+**只有 1 个进程**。构建是串行的，不存在 writer 冲突。Dockerfile 里那段
+"two writers on one store park each other" 的注释就是这个错误结论，已删除。
+
+### 真因（pnpm 官方文档）
+[pnpm 官方 Docker 指南](https://pnpm.io/docker) 原文：
+
+> When the base image has a runtime installed, **keep the build cache at a separate location,
+> such as `/var/cache/pnpm`**. Mounting a cache over `/pnpm/store` **hides the managed runtime**
+> for the duration of the RUN instruction. The examples below set `--store-dir` to the cache mount.
+
+也就是说：**`PNPM_HOME=/pnpm` 时，`/pnpm/store` 是 pnpm 托管的默认 store 位置**，
+把 cache mount 盖在上面会遮住那里原有的东西，pnpm 随后在一个被替换掉的目录上等待。
+
+我们的 Dockerfile 正好踩中：`PNPM_HOME=/pnpm`（第 41 行）+ cache 挂到 `/pnpm/store`。
+
+### 修法（官方配方）
+**缓存照常跨构建复用**，只把挂载点和 store-dir 都挪走：
+
+```dockerfile
+RUN --mount=type=cache,id=dataops-dsh-npm,target=/root/.npm,sharing=locked \
+    --mount=type=cache,id=dataops-dsh-pnpm-store,target=/var/cache/pnpm,sharing=shared \
+    set -eux; \
+    store=/var/cache/pnpm; \
+    test -d "$store"; \
+    export npm_config_store_dir="$store"; \
+    export PNPM_STORE_DIR="$store"; \
+    ...
+```
+
+两个都要设：`npm_config_store_dir` 是 pnpm 读的环境变量形式，`PNPM_STORE_DIR` 覆盖
+DSH 自己 spawn 的 pnpm 子进程。
+
+### 实测效果
+| | 修复前 | 修复后 |
+|---|---|---|
+| 同一步 | 永不返回（>8 分钟无进展） | `Done in 1m 51.2s` |
+| 挂载点 | `/pnpm/store` | `/var/cache/pnpm` |
+
+### 排查这类"卡住"的通用手法
+```bash
+P=$(ps -eo pid,cmd | grep "[p]npm install" | awk '{print $1}' | head -1)
+cat /proc/$P/wchan                    # epoll_wait = 在等，不是在算
+awk '{print $14+$15}' /proc/$P/stat   # 隔 10 秒再看，delta=0 即真卡住
+ls -l /proc/$P/fd | grep -oE '/[^ ]*store[^ ]*' | sort -u   # 它在等哪个 store
+grep -E "cache|store" /proc/$P/mounts # 挂载点是否盖住了 PNPM_HOME
+```
+
+**判据**：`wchan=epoll_wait` + CPU delta=0 + 无 TCP 连接 + 有 store 句柄 ⇒ 本地 store 问题，
+不是网络问题（别再去调代理或镜像源）。
+
+## 40. 手写 pin 列表不收敛 —— 从安装树**派生**
+
+### 症状
+镜像构建通过，但工作区 DSH 启动失败：
+
+```
+DSH_START_FAILED: DSH Web exited before readiness (exit code 1)
+incompatible with dsh 0.2.1-alpha.1: peerDependencies {"@deepseek-ai/dsh-llm":"0.2.1-alpha.2", ...}
+dsh: disabling profile plugin row "plugin-inventory"
+```
+
+根因与 §33 同源：profile 自由解析到 `0.2.1-alpha.2`，而重发布集合只有 alpha.1。
+但**逐个手写 pin 名单不收敛**，实测计数：60 → 48 → 22 → 1 → 服务仍起不来，
+因为每一轮修好一批，下一批错位又暴露出来。
+
+### 为什么会一直漏
+漏点不在"少数共享 peer"，而是**所有官方包同时漂移**：runtime 与插件同进程，
+DSH 会禁用**任何**精确 peer 与所启动 runtime 不一致的行，留一个就够停服。
+
+### 修法：从安装树派生，读**两个深度**
+关键坑：官方包并不都在 scope 根下。实测：
+
+| 位置 | 数量 |
+|---|---|
+| `/opt/dsh-plus/node_modules/@deepseek-ai` | 70 |
+| `/opt/dsh-plus/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai` | **279** |
+
+只读一个目录 → 只 pin 到 92 个；两个都读 → **285 个**。差的就是停服的那批
+（`dsh-host-plugin-inventory`、`dsh-agent-instructions`、`dsh-api-remotes` …）。
+
+```js
+const scopes = [
+  join(install, 'node_modules', '@deepseek-ai'),
+  join(install, 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai'),
+]
+for (const scope of scopes) {
+  let entries
+  try { entries = readdirSync(scope, { withFileTypes: true }) } catch { continue }
+  readOfficialsInto(scope, entries, names, officialPrefix)
+}
+```
+
+**验证方式（必做）**：改完先在真实安装树上干跑装配器，不要直接建镜像：
+
+```bash
+docker run -d --name dry --entrypoint sh dataops-ai-workspace:local -c 'sleep 900'
+docker cp assemble-registry-profile.mjs dry:/tmp/asm.mjs
+docker exec dry sh -c 'rm -rf /tmp/prof && node /tmp/asm.mjs --install /opt/dsh-plus --profile /tmp/prof' 
+# 看输出的 overrides 数（92 → 285）和抽查关键包版本
+```
+
+### 嵌套副本也要处理
+`dsh-app-boot` 在依赖方目录下还有一份嵌套副本（`dsh-config-editor/node_modules/...`），
+顶层做 symlink **不管用** —— 编辑器从自己目录解析，仍拿到另一份，于是
+"同一进程里两份 boot 层"。Dockerfile 里要把嵌套副本一并替换成链接并断言无残留。
+
+## 41. 构建"卡住"与"慢"是两件事，都要治
+
+| 问题 | 判据 | 修法 |
+|---|---|---|
+| **卡住** | `wchan=epoll_wait` + CPU delta=0 + 无 TCP + 有 store 句柄 | 见 §39：store 缓存移出 `PNPM_HOME` |
+| **慢** | 每层都有 DONE 时间 | 见下 |
+
+提速实测：
+- Docker 构建走本地代理（`--network host` 时 `127.0.0.1:7897` 即 Windows 上的 Clash）：
+  4.3 MB tarball 直连 362 KB/s → 代理 1.36 MB/s（**3.7×**）
+- standalone 安装层补上 `--mount=type=cache`（几百个包的闭包）
+- `--progress=plain`：不加时 20 分钟无输出，与卡死无法区分
+
+结果：>20 分钟 → 约 3 分钟。
+
+**注意**：`docker run` 默认 bridge 网络，`127.0.0.1` 是容器自己。想给容器代理必须用
+`--network host`，或在 `~/.docker/config.json` 全局设 `proxies`（后者会**污染所有 bridge 容器**，
+我踩过这个坑，容器里 `HTTPS_PROXY=127.0.0.1:7897` 直接 ECONNREFUSED）。
+
+## 42. 验证工作区镜像的快捷方式（不必每次整建）
+
+镜像构建后会验证 36 项。改动只在 profile 层时，可以：
+
+```bash
+# 只跑验证，不重建
+cd dataops/infra/docker-workspace && node verify-workspace-image.mjs --image dataops-ai-workspace:local
+```
+
+工作区容器**不会**因为镜像更新而自动换镜像 —— 它按名字引用 `dataops-ai-workspace:local`。
+要让现有工作区采用新镜像：删掉容器（**具名卷保留**），再 `POST /api/ai/workbench/dsh/ensure`，
+后端会用当前 local 标签重建。这正是「数据与镜像层分离」的实证：
+
+```
+更新镜像 → 重建容器 → 卷 dataops-ai-admin-dsh-run 里的 30 个 skill-packages 与 runtime.env 全在
+```
+
+## 43. 日志是**累积**的：`grep` 一个禁用记录不等于它现在仍被禁用
+
+排查「插件被禁用」时最容易犯的错：
+
+```bash
+docker exec <ws> grep -c "disabling.*plus-backup" /workspace/.dataops/dsh/logs/web.log
+# -> 61   ← 看起来"仍然被禁用"
+```
+
+**但 `web.log` 从不轮转**，它跨越了容器/DSH 的每一次启动。61 次是历史累积。
+
+### 正确判据：只看**本次启动之后**的新增行
+```bash
+# 1. 记录重启前基线
+before=$(docker exec <ws> sh -c 'wc -l < /workspace/.dataops/dsh/logs/web.log')
+# 2. 用正规命令重启
+docker exec <ws>-dsh-runtime dataops-dsh-service stop
+docker exec <ws>-dsh-runtime dataops-dsh-service ensure
+# 3. 只看新增行
+docker exec <ws> sh -c "tail -n +$((before+1)) /workspace/.dataops/dsh/logs/web.log" | grep -E "disabling|skipping"
+```
+
+实测：重启后新增 7 行，其中**没有** `plus-backup`（最后一次出现在第 27539 行，
+而重启从第 28069 行开始）。`plus-backup` 确实已修好。
+
+### 真正的修法（plus-backup 案例）
+插件自身把 peer 从 `^0.1.6-alpha.1` 放宽到 `>=0.1.6-alpha.1`：
+
+| 版本 | locale-peer |
+|---|---|
+| 0.2.1-alpha.14 | `^0.1.6-alpha.1` ← 旧，被禁用 |
+| 0.2.1-alpha.20 | `>=0.1.6-alpha.1` ← 新，兼容 |
+
+因为 profile 会**从模板刷新**，镜像里带上 alpha.20 后，运行中 profile 也变成 alpha.20，
+重启即不再被禁用。
+
+### 一般的坑
+**先区分「日志里的历史记录」和「当前状态」**。看到禁用/报错先问：
+这条是本次启动产生的吗？基线在哪里？
+
+## 44. 「重新连接中」的真根因：DSH 的 **Host 信任栅栏**拒绝非 loopback 的 Host
+
+### 症状
+内网 IP 打开 `http://192.168.1.115:8080/ai/dsh`：
+
+- iframe 内 DSH **页面能渲染**（侧栏、输入框都在）
+- 但左下角一直「重新连接中」，会话列表空
+- 网关日志 **141 次 502 / 300 行**，全是 `GET /api/remote.mux`
+
+### 三层证据链
+
+**① 网关层**：`remote.mux` → 502
+```
+upstream prematurely closed connection ... "GET /api/remote.mux"
+upstream: "http://172.19.0.3:32008/api/remote.mux"
+```
+
+**② 后端层**：请求被 origin 栅栏拒绝
+```
+event: ai.workspace_web_gateway.browser_provenance_rejected
+secFetchMode=websocket  targetRef=ae9d09bb-...
+```
+
+**③ DSH 自身层**（真根因）—— `dsh-client-connection` 的官方 README 原文：
+> Before authentication, every request still passes `src/api-request-trust.ts`.
+> Its **`Host` must be loopback or match a `trustedHosts` entry**...
+> A failed Host/Origin check returns **403**
+
+以及配置契约（`ConnectionConfig.trustedHosts`）：
+> Authorities this deployment serves beyond loopback... a non-loopback (`0.0.0.0`)
+> deployment **must declare the names it is reached by**; the Web runtime derives LAN IP
+> literals from an **active all-interface bind**.
+
+### 为什么没自动生效
+DSH 由 `dataops-dsh-service` 以 **`--host 127.0.0.1`** 启动（隧道内回环），
+**不是** `0.0.0.0`，所以「从全接口绑定推导 LAN IP」这条自动路径不成立。
+浏览器发的 `Host: 192.168.1.115:32008` 既非 loopback、又不在 `trustedHosts` → 403 → 客户端无限重连。
+
+### 修法
+在 **user patch**（`/workspace/.dataops/dsh/cordis.patch.yml`）里声明：
+```yaml
+- id: client-connection
+  name: "@deepseek-ai/dsh-client-connection"
+  config:
+    trustedHosts:
+      - "192.168.1.115:32008"
+      - "192.168.1.115"
+```
+
+**两个坑**：
+1. **顶层 `- id:` 必须 0 缩进**。写成 2 空格会 `YAMLException: bad indentation of a sequence entry`，
+   DSH **拒绝启动**（`failed to parse patches`）。
+2. 端口要写 **`:32008`**（工作区 target origin），不是 `:8080`（父页面）。
+
+### 实测效果
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| 网关 502 | 141 次 / 300 行 | **0** |
+| provenance 拒绝 | 11 次 | **0** |
+| 页面 | 「重新连接中」，会话列表空 | **正常**，会话列表全部加载 |
+
+### 排查这类问题的顺序（别再走弯路）
+1. **网关日志看状态码分布** → 定位是哪个 URL 在失败
+2. **后端日志看 `event` 名** → `browser_provenance_rejected` 直指信任栅栏
+3. **读该插件的 README.md** → DSH 的包 README 写清了配置契约与自动推导条件
+4. 不要一上来怀疑网络/代理 —— 401 是正常鉴权，**403 才是栅栏拒绝**
+
+### 附带澄清
+`/api/remote.mux` 不是 DataOps 的接口，是 `@deepseek-ai/dsh-api-gateway` 的
+**WebSocket 流复用通道**（`REMOTE_STREAM_MUX_PATH`），DSH 客户端靠它建立连接。
+它 502 就等于客户端连不上。
+
+## 45. 补丁行是「替换」不是「合并」—— 少写一个键就静默丢掉行为
+
+`cordis.patch.yml` 里 `- id: <row>` 的一行**整体替换**该 row 的 `config`，不是深合并。
+只写你要改的那个键，其余键会**静默消失**（schema 默认值接管），不会报错。
+
+实测代价：给 `web-runtime` 行只写 `trustedHosts` 后，`openBrowser` / `printUrl` /
+`publicUrl` / `surfaceContext` 四个键被丢掉，DSH 于是不再听 `--no-open`：
+
+```
+dsh web: http://127.0.0.1:3080/
+dsh web: opening the default browser; pass --no-open to disable   <-- 回归
+```
+
+**写法**：先读 bundle 那一行的完整 `config`，然后**原样复述每个键**，只改目标键：
+
+```yaml
+- id: web-runtime
+  config:
+    openBrowser: !!js ctx.webStartup.openBrowser
+    printUrl: true
+    publicUrl: !!js ctx.webStartup.publicUrl
+    surfaceContext: true
+    trustedHosts: [...]        # 只有这行是我的改动
+```
+
+**判据**：改完必须重跑该 row 原本负责的可观测行为（这里就是启动日志里不该出现
+`opening the default browser`）。schema 默认值**不等于**运行时实参：`openBrowser`
+默认 `true`，而 `!!js ctx.webStartup.openBrowser` 会随 `--no-open` 变 `false`。
+
+## 46. 侧边栏「无法打开 / Failed to fetch」的**两个**真根因
+
+这两条互相独立，只修一条仍会失败，且症状完全不同 —— 必须分别验证。
+
+### (a) Host 信任栅栏：403（见 §44）
+
+`dsh-better-sidebar` 的 `/sidebar/*` 有自己的 fence，读的是 **`ctx.webRuntime.trustedHosts`**：
+
+```js
+const fence = (req) => isTrustedApiRequest(req, ctx.webRuntime.trustedHosts);
+```
+
+而 `webRuntime` 由 `@deepseek-ai/dsh-web-app` 提供，来自该 row 的 `config.trustedHosts`，
+经 `resolveLanTrust(ctx.webServer.host, config.trustedHosts)` 推导：
+
+```js
+const lanAddresses = bindHost === ALL_INTERFACES_HOST   // 只有 0.0.0.0 才采样
+  ? Object.values(networkInterfaces())...
+  : [];                                                  // 127.0.0.1 -> 空数组
+```
+
+工作区把 DSH 起在 `127.0.0.1`（网关是唯一入口），所以推导出空数组。
+
+**改 `connection` / `client-connection` 行的 `trustedHosts` 完全无效** —— 那是另一个
+服务（`association` 由 plus 的 patch 从 `webRuntime.trustedHosts` 反向继承）。要改的是
+`web-runtime` 那一行，且必须复述它的全部键（见 §45）。
+
+**工作区侧的写法定为从部署变量派生**，不要硬编码 IP：
+
+```yaml
+- id: web-runtime
+  config:
+    openBrowser: !!js ctx.webStartup.openBrowser
+    printUrl: true
+    publicUrl: !!js ctx.webStartup.publicUrl
+    surfaceContext: true
+    trustedHosts: !!js (() => { const origin = process.env.DATAOPS_PUBLIC_APP_ORIGIN; if (!origin) return []; try { const url = new URL(origin); return [...new Set([url.host, url.hostname].filter(Boolean))]; } catch { return []; } })()
+```
+
+前置条件：`DATAOPS_PUBLIC_APP_ORIGIN` 必须**真的进到 companion 容器**。它不在
+`isDshCompanionEnv` 白名单里，所以需要在 `ai-workspace-docker-driver.ts` 的该白名单
+**和** `ai-workspace.service.ts:buildWorkspaceRuntimeEnv` 各加一处；只加一处等于没配。
+
+**匹配语义是「无端口则按 hostname，有端口则按 host:port」**，所以
+`trustedHosts: ["192.168.1.115"]` 一个无端口条目即可覆盖 32008 / 8080 等**任意端口**：
+
+```js
+return canonicalAuthority(entry, entryUrl) === entryUrl.hostname
+  ? entryUrl.hostname === hostUrl.hostname      // 无端口 -> 只比 hostname
+  : entryUrl.host === hostUrl.host;             // 有端口 -> 比 host:port
+```
+
+### (b) `mediaLimit` 与 `uploadLimit`：400 `not a file or too large`
+
+fence 放行之后，媒体路由还有一道**独立**的尺寸闸：
+
+```js
+if (!info.isFile() || info.size > resolved.mediaLimit)
+  throw new SidebarError("fs-error", "not a file or too large", 400);
+```
+
+默认 `mediaLimit = 20971520`（**20 MiB**）、`uploadLimit = 134217728`（128 MiB）。
+120 MB 的产物文件因此必然 400，而 DataOps 后端同文件的路由却是 200 ——
+**「后端能下、侧边栏不能下」就是这个信号**，别再去查网络。
+
+```yaml
+- id: better-sidebar
+  config:
+    mediaLimit: 268435456
+```
+
+注意该路由是 `await readFile(path)` **整体缓冲**，不是流式；`mediaLimit` 是它唯一的
+上界，所以放大到 256 MiB 是有意为之（能覆盖真实产物），不要无脑做成无限大。
+
+### 正确的探测姿势（别再用错误 URL 猜）
+
+`/sidebar/*` 的路径与参数**不是猜出来的**，是从实现里读出来的：
+
+```
+GET  /sidebar/file?sessionId=<id>&path=<abs-or-cwd-relative>&download=1
+GET  /sidebar/api/config        (405 = 只接受 POST)
+GET  /sidebar/archive?id=&sessionId=
+```
+
+- **403 = 栅栏拒绝**（根因 a）
+- **405 / 400 = 栅栏已放行**，只是方法/参数不对 —— 这是个**有用的中间态**，说明 a 已修好
+- **500 session "..." = 栅栏已放行**，sessionId 不存在
+- **400 not a file or too large = 根因 b**
+
+真实 `sessionId` 从 `/workspace/.dataops/dsh/sessions/<workspace>/` 下取
+（目录名形如 `session-<uuid>`）。
+
+## 47. 补字典不够：绕过查表的**调用点**才是标签不生效的原因
+
+给 i18n 字典补 key 后界面仍是英文，先怀疑**调用点绕过了查表**。
+
+`@deepseek-ai/dsh-client-ui-permission-presets` 的 `auto` 预设有两处硬编码分支，
+直接读 `t("auto.label")`，**根本不走** `displayPermissionPreset`：
+
+```js
+// permissionLabel()
+if (value === "auto") return t("auto.label");          // 绕过
+// optionsOf()
+label: option.value === "auto" ? t("auto.label") : displayPermissionPreset(...)  // 绕过
+```
+
+而 `accessZh["auto.label"]` 的值恰好是**英文产品名**，补 `preset.auto` 字典对它毫无作用。
+
+**正确修法**：删掉这两处分支，让 `auto` 和别的预设走同一条查表路径
+（`PRESET_LABEL_KEYS` 里 `["auto","preset.auto"]`）。
+
+**验证方式**：不要只看字典内容，要**按真实边界**取出字典并跑真实分支做 A/B：
+
+```python
+# 用花括号配平取块，别用固定长度窗口（accessZh 与 accessEn 会串）
+# 然后对照：旧路径 t("auto.label")  vs  新路径 displayPermissionPreset(...)
+```
+
+**旁证**：界面上本来就正常显示的 `完全权限`，正是 `accessZh["preset.fullAccess"]` ——
+说明 `t` 读的就是这一层，同一个字典里 `preset.auto` 已是中文即可判定修复成立。
+
+
+## 48. 部署入口换 IP 时，「Failed to fetch」不是应用故障
+
+截图上浏览器对 `/ai/dsh` 报 **`ERR_CONNECTION_TIMED_OUT`** 或页面里报 **`Failed to fetch`**，
+先分清是**网络层**还是**应用层**——两者的排查入口完全不同。
+
+### 第一步：确认这个 IP 还是不是本机
+
+```sh
+ip -4 addr show | grep <该IP>          # 在 WSL 里查
+```
+
+本机实测：`192.168.1.115` **不再是本机地址**（`ip route get 192.168.1.115` 显示它要经网关转发出去），
+真实 LAN 地址已变成 `192.168.2.22`。**换网/换 DHCP 后 IP 会变，而配置里的旧 IP 不会自己更新。**
+
+**判据**：从 Windows 侧（浏览器所在侧）测，而不是从 WSL 内侧测：
+
+```powershell
+Invoke-WebRequest 'http://<IP>:8080/ai/dsh' -UseBasicParsing -TimeoutSec 8
+```
+
+实测 `192.168.2.22:8080` → **200**，`192.168.1.115:8080` → 超时。
+而 WSL 内部访问**自己**的网卡 IP 会因为 iptables DNAT 回包被重置而报 000 ——
+**这是 WSL mirrored 模式的假阴性，不代表部署坏了**（见 §DEPLOYMENT.md 第 4 条坑）。
+
+### 第二步：IP 改了以后，这些地方都要跟着改
+
+| 位置 | 作用 | 现象 |
+| --- | --- | --- |
+| `backend/.env` 的 `DATAOPS_PUBLIC_APP_ORIGIN` | iframe 祖先判定、绝对链接、CORS | 旧 origin → 401 / 跨站被拒 |
+| 工作区 `/workspace/.dataops/dsh/cordis.patch.yml` 的 `trustedHosts` | better-sidebar 的 Host 栅栏（§46a） | 旧 IP → `/sidebar/*` 403 |
+
+**注意 `start-local-cluster.sh` 只接受单 origin**：它对 `DATAOPS_PUBLIC_APP_ORIGIN` 用
+`^https?://[^/]+$` 校验，写成逗号列表会直接 `fail`。多入口要走后端自己的
+`resolveDataopsPublicAppOrigins`（那个才支持逗号列表），但**启动脚本这一关先过不去**。
+
+### 第三步：改完 .env 必须重建容器，`docker restart` 无效
+
+后端读的是 `--env-file` 指定的文件（容器内路径 `/run/secrets/dataops-backend-env`），
+**`docker restart` 不会重新读取它**。实测重启后容器内仍是旧值：
+
+```
+docker exec dataops-backend-1 sh -c 'env | grep PUBLIC_APP_ORIGIN'
+DATAOPS_PUBLIC_APP_ORIGIN=http://192.168.1.115:8080   ← 还是旧的
+```
+
+要用仓库的启动脚本重建：
+```sh
+bash scripts/start-local-cluster.sh stop  --name <name>
+bash scripts/start-local-cluster.sh start --port 8080 --env <env文件> --name <name> ...
+```
+
+### 第四步：`Failed to fetch` 的真正来源
+
+页面能渲染 ≠ 已登录。DSH 面板由 **已鉴权的 `POST /api/ai/workbench/dsh/ensure`** 驱动：
+
+```ts
+// ai-dsh-workbench.controller.ts
+const status = await this.service.ensure(user);
+const targetOrigin = await this.webGateway.ensureTargetListener(target, ...);
+```
+
+**listener 是懒创建的**——没有这次 ensure，后端根本不在 32008 上监听，
+网关转发就得到 **502**。
+
+会话是**按 origin 隔离的 cookie**。origin 从 `192.168.1.115:8080` 换成
+`192.168.2.22:8080` 后，浏览器上的旧 cookie 不再匹配，于是：
+
+```
+GET  /api/auth/me                      -> 401
+GET  /api/ai/workbench/dsh/status      -> 401
+POST /api/ai/workbench/dsh/ensure      -> 401
+GET  /                     (32008)     -> 502      ← 前端显示 "Failed to fetch"
+```
+
+**这不是 bug，是新 origin 未登录**。换 IP 后需要在该新地址重新登录一次。
+
+### 排查这类问题的顺序
+
+1. `ip -4 addr show` —— 确认这个 IP 还是不是本机（换网后 IP 会变）
+2. **从浏览器那一侧**（Windows）测，不要在 WSL 内部测自己的网卡 IP
+3. 看网关访问日志里**浏览器的 UA**——`401` 就是未登录，`502` 是上游没监听
+4. `/api/ai/workbench/dsh/ensure` 是否被调用过 —— 决定 32008 有没有 listener
+5. 改 `.env` 后是否**重建**了容器（`restart` 不够）
