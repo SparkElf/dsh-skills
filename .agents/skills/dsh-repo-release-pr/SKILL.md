@@ -281,3 +281,29 @@ gh run view <run-id>
 - ❌ bump 后不跑 `pnpm install --lockfile-only` —— CI 每个 job 都在 `--lockfile-only` 上红。
 - ❌ 把 `E409` 当成发布失败 —— 那是暂存窗口，重跑即完成。
 - ❌ 删分支不先建备份 tag —— 本仓库分支常常只存在于本地，删了就没了。
+
+## 本机的 npm 凭证与发布 registry（踩过的坑）
+
+- **凭证位置**：`/root/.npmrc`，其中只有一条 `//registry.npmjs.org/:_authToken=...`，身份是 `forestlightelf`。
+  **只使用，不回显**：不要 `cat` 这个文件，也不要把值写进任何仓库文件或对话。
+- **默认 registry 是镜像站**：`registry=https://registry.npmmirror.com` 是只读镜像，**不接受发布**
+  （用它跑 `npm publish` 会以看不出的方式失败或报 ENEEDAUTH）。发布必须显式指定官方源：
+
+  ```bash
+  npm publish --registry https://registry.npmjs.org --access public
+  ```
+
+- **自查身份**（不泄露 token）：
+
+  ```bash
+  npm whoami --registry https://registry.npmjs.org   # 期望 forestlightelf
+  ```
+
+- **发布后确认**（官方源可能有几分钟延迟，别立刻断言失败）：
+
+  ```bash
+  npm view <pkg> version --registry https://registry.npmjs.org
+  ```
+
+- 本仓库的插件包带 `prepack: pnpm run build`，发布前确认 `lib/` 能构建；
+  若 `pnpm` 不可用可先手动 `npm run build` 再用 `--ignore-scripts` 发布。
